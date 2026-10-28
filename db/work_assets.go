@@ -1267,18 +1267,14 @@ func applyWorkAssetRunSnapshot(run *WorkTaskAssetRun) {
 }
 
 func (d *DB) WorkTaskAssetStats(ctx context.Context) (map[string]int64, error) {
-	rows, err := d.QueryContext(ctx, `SELECT
+	row := d.QueryRowContext(ctx, `SELECT
 COUNT(*) FILTER (WHERE deleted_at IS NULL),
 COUNT(*) FILTER (WHERE deleted_at IS NULL AND parse_status IN ('pending','processing')),
 COUNT(*) FILTER (WHERE deleted_at IS NULL AND parse_status='failed'),
 COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)
 FROM work_assets WHERE owner_key=$1`, WorkOwner)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var total, processing, failed, trashed int64
-	if err := rows.Scan(&total, &processing, &failed, &trashed); err != nil {
+	if err := row.Scan(&total, &processing, &failed, &trashed); err != nil {
 		return nil, err
 	}
 	return map[string]int64{

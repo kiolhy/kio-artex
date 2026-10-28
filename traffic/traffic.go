@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -202,8 +204,12 @@ func Open(dir, addr string) (*Traffic, error) {
 	}
 
 	p, err := mproxy.NewProxy(&mproxy.Options{
-		Addr:        addr,
-		SslInsecure: true,
+		Addr: addr,
+		// 上游 TLS 默认校验。二开 Alex-Wmz d5e4be6 的结论：录制代理对目标做 MITM
+		// 时若跳过校验，等于把"目标证书是不是真的"这件事永远丢掉，而录制下来的
+		// 内容又会被当成可信证据。默认校验 + 一个显式逃生开关：
+		//   ARTEX_TRAFFIC_INSECURE_TLS=1   # 恢复旧行为，录制自签/过期证书目标
+		SslInsecure: insecureUpstreamTLS(),
 		CaRootPath:  filepath.Join(dir, "_ca"),
 	})
 	if err != nil {
@@ -406,7 +412,18 @@ func (s *sink) RequestError(f *mproxy.Flow, err error) { s.t.maybePassthrough(f,
 // connection, but only for errors the proxy itself caused — a target that is
 // simply down/filtered would fail without us too, and must stay MITM'd+recorded.
 func (t *Traffic) maybePassthrough(f *mproxy.Flow, err error) {
-	if err == nil || f == nil || f.Request == nil || f.Request.URL == nil || !proxyCausedErr(err) {
+	if err == nil || f == nil || f.Request == nil || f.Request.URL == nil {
+		return
+	}
+	// 证书校验失败是"目标不可信"，不是"代理自身处理不了"。绝不能透传掩盖：
+	// 透传后连接直连目标、不记录，用户会以为录制成功，实际什么都没抓到。
+	if isCertErr(err) {
+		log.Printf("[traffic] 目标 %s 的 TLS 证书校验失败（默认开启校验，不会透传掩盖）。"+
+			"如需录制自签/过期证书目标，设 ARTEX_TRAFFIC_INSECURE_TLS=1 后重启：%v",
+			f.Request.URL.Hostname(), err)
+		return
+	}
+	if !proxyCausedErr(err) {
 		return
 	}
 	host := f.Request.URL.Hostname()
@@ -420,12 +437,49 @@ func (t *Traffic) maybePassthrough(f *mproxy.Flow, err error) {
 
 // proxyCausedErr reports whether err indicates the interception layer (not the
 // target) is at fault — HTTP/2 handling, HEAD-with-body, or a protocol violation.
+// 证书类错误被显式排除：那是目标不可信，透传只会把失败伪装成成功。
 func proxyCausedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isCertErr(err) {
+		return false
+	}
 	s := strings.ToLower(err.Error())
 	for _, p := range []string{"head request", "http2", "http/2", "protocol error", "protocol_error", "malformed"} {
 		if strings.Contains(s, p) {
 			return true
 		}
+	}
+	return false
+}
+
+// isCertErr 判断错误是否属于 TLS 证书校验失败（未知 CA / 主机名不符 / 证书过期等）。
+// 用 errors.As 认类型，再退回字符串兜底：go-mitmproxy 会把上游错误包成不同形态。
+func isCertErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var (
+		unknownAuthority x509.UnknownAuthorityError
+		hostname         x509.HostnameError
+		invalid          x509.CertificateInvalidError
+		verify           *tls.CertificateVerificationError
+	)
+	if errors.As(err, &unknownAuthority) || errors.As(err, &hostname) ||
+		errors.As(err, &invalid) || errors.As(err, &verify) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "x509:") || strings.Contains(s, "certificate") ||
+		strings.Contains(s, "tls: failed to verify")
+}
+
+// insecureUpstreamTLS 读取录制代理的上游 TLS 校验开关（默认关闭跳过校验）。
+func insecureUpstreamTLS() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ARTEX_TRAFFIC_INSECURE_TLS"))) {
+	case "1", "true", "yes", "on":
+		return true
 	}
 	return false
 }
