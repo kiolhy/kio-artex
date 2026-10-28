@@ -281,6 +281,9 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			if sawContent || attempt >= 2 || !emptyRetryEnabled() {
 				break
 			}
+			if _, ok := doubleMaxTokens(req); !ok {
+				break
+			}
 			retried = true
 			pending = nil // 丢掉空响应那一轮的元数据事件，避免重复
 			log.Printf("[llm] 空响应（无正文/无思考/无工具调用），max_tokens 翻倍后重试一次：model=%s profile=%s", r.model, r.prof)
@@ -288,7 +291,13 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 
 		// 最终仍是空响应时，把它那点元数据事件原样交给调用方（保持与原实现一致）。
 		if !flushed {
-			flushPending()
+			if !flushPending() {
+				// Consumer stopped while we were flushing buffered metadata. Preserve
+				// its cancellation as an error instead of misclassifying the call as
+				// a normal empty response.
+				finish(ctx.Err())
+				return
+			}
 		}
 		finish(streamErr)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -39,6 +40,7 @@ type Planner struct {
 	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
+	hooksFn           func() harness.HookRunner              // 拦截钩子解析器（见 SetHooks）; nil = 不挂钩子
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -53,6 +55,26 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// SetHooks 让 planner 的每次工具调用都经过拦截钩子（与 worker 同一套 guard）。
+//
+// 为什么需要单独接一遍：worker 的钩子是 engine 每次 Execute 时传进去的，而 planner
+// 是长期对象、自己拼 agentcore.Options，原先压根没有 Hooks 字段——于是拦截规则
+// （危险命令、删除类接口、资产黑名单……）只对 worker 生效，planner 想跑什么就跑什么。
+// planner 手里同样有 Bash 和全套工具，这个缺口等于让规则漏掉一半。
+//
+// 传 resolver 而不是 *guard.Guard：钩子要跟着「当前这个任务的 guard」走，guard 被替换
+// （热更新拦截规则）后下一次 run 立即生效。resolver 返回 nil 表示不挂钩子——没有配置
+// 拦截器时必须保持放行，绝不能因为"没 guard"就拒绝所有工具调用。
+func (p *Planner) SetHooks(fn func() harness.HookRunner) { p.hooksFn = fn }
+
+// hookRunner 解析出本次 run 要挂的钩子；未配置（或 resolver 返回 nil）时为 nil。
+func (p *Planner) hookRunner() harness.HookRunner {
+	if p.hooksFn == nil {
+		return nil
+	}
+	return p.hooksFn()
+}
 
 // SetCompactor wires the cold-node compactor (cold-digest §7). Called each
 // planner wake-up to advance the round counter, maintain cold stamps, and
@@ -451,6 +473,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx
 		opts.SessionID = fmt.Sprintf("exp%d-planner", ts.ID())
+	}
+	// 拦截钩子：planner 与 worker 必须用同一套规则（见 SetHooks 的注释）。
+	// resolver 返回 nil（未配置拦截器）时保持不挂钩子，行为与之前完全一致。
+	if hr := p.hookRunner(); hr != nil {
+		opts.Hooks = hr
 	}
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
 	noaSession := fmt.Sprintf("exp%d-planner", ts.ID())

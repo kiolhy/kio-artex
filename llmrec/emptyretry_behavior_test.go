@@ -159,11 +159,15 @@ func TestStreamNoRetryWithoutMaxTokens(t *testing.T) {
 	inner := &fakeProvider{attempts: [][]llm.StreamEvent{empty, empty}}
 	rec := Wrap(inner, nil, "m", "p", "", "", noRecord)
 
-	if _, err := collect(t, rec.Stream(context.Background(), llm.CompletionRequest{})); err != nil {
+	got, err := collect(t, rec.Stream(context.Background(), llm.CompletionRequest{}))
+	if err != nil {
 		t.Fatalf("未预期错误: %v", err)
 	}
 	if inner.calls != 1 {
 		t.Fatalf("无 max_tokens 时不该重试，实际 %d 次", inner.calls)
+	}
+	if len(got) != len(empty) {
+		t.Fatalf("不重试时必须保留本轮元数据事件，期望 %d 个，实际 %d 个", len(empty), len(got))
 	}
 }
 

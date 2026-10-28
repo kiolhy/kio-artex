@@ -114,7 +114,10 @@ FROM llm_usage WHERE profile_name=$1`, profile).Scan(&count, &input, &output, &w
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantStatus := "ok"
+		// This fixture carries only metadata and usage, so a fully consumed
+		// stream is classified as an empty response. An early consumer exit is
+		// still recorded as an error.
+		wantStatus := "empty"
 		if early {
 			wantStatus = "error"
 		}

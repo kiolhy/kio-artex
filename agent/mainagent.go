@@ -7,6 +7,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -33,6 +34,19 @@ type MainAgent struct {
 	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	hooksFn         func() harness.HookRunner              // 拦截钩子解析器（见 SetHooks）; nil = 不挂钩子
+}
+
+// SetHooks 让主 Agent 的每次工具调用都经过拦截钩子（与 worker / planner 同一套规则）。
+// resolver 返回 nil 表示未配置拦截器：此时必须保持放行，不能因为没 guard 就拒绝工具。
+func (m *MainAgent) SetHooks(fn func() harness.HookRunner) { m.hooksFn = fn }
+
+// hookRunner 解析出本次 run 要挂的钩子；未配置（或 resolver 返回 nil）时为 nil。
+func (m *MainAgent) hookRunner() harness.HookRunner {
+	if m.hooksFn == nil {
+		return nil
+	}
+	return m.hooksFn()
 }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
@@ -182,6 +196,10 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		if mainSeg > 0 {
 			opts.SessionID = fmt.Sprintf("exp%d-main-s%d", ts.ID(), mainSeg)
 		}
+	}
+	// 拦截钩子：主 Agent 与 worker / planner 共用同一套规则（见 SetHooks）。
+	if hr := m.hookRunner(); hr != nil {
+		opts.Hooks = hr
 	}
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
 	// session id 与 transcript 同规则(分段感知),使归档与恢复对齐。
