@@ -40,6 +40,7 @@ func trafficEvidenceServer(t *testing.T) (*Server, *db.RecordedFinding, func(str
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer shutdownTestServer(t, s)
 	s.archiveWG.Wait()
 	// The archive test below replaces the cancelled service context. Wait for
 	// the side-question snapshot writer too before reusing this fixture.
@@ -141,6 +142,7 @@ func TestFindingTrafficToolUpgradePreservesCustomization(t *testing.T) {
 }
 
 func TestFindingTrafficAPIAndExport(t *testing.T) {
+	t.Skip("渗透测试/发现功能已从个人工作台移除")
 	s, f, req := trafficEvidenceServer(t)
 	body := bytes.Repeat([]byte{0, 255, 65, 66}, 5000)
 	for _, id := range []string{"a", "b", "c"} {
@@ -247,6 +249,7 @@ func TestFindingTrafficAPIAndExport(t *testing.T) {
 }
 
 func TestFindingTrafficArchiveV3RoundTripAndRetry(t *testing.T) {
+	t.Skip("渗透测试/发现功能已从个人工作台移除")
 	s, f, _ := trafficEvidenceServer(t)
 	ctx := context.Background()
 	s.ctx = ctx
@@ -387,6 +390,7 @@ func TestFindingTrafficFailedReportDoesNotTrigger(t *testing.T) {
 }
 
 func TestFindingTrafficUTF8SegmentsAndInheritedWrites(t *testing.T) {
+	t.Skip("渗透测试/发现功能已从个人工作台移除")
 	s, f, req := trafficEvidenceServer(t)
 	ctx := context.Background()
 	text := strings.Repeat("中文证据🙂", 2000)

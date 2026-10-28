@@ -116,6 +116,126 @@ func TestExplorationFlow(t *testing.T) {
 	}
 }
 
+func TestOpenGoalWithoutActiveIntent(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	expID, err := d.CreateExploration("test", "detect stalled personal planning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	es := d.Exploration(expID)
+
+	if _, err := es.AddGoal(map[string]any{"text": "deliver result"}, "human"); err != nil {
+		t.Fatal(err)
+	}
+	intentID, err := es.AddIntent(map[string]any{"summary": "do work"}, 5, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stalled, err := es.OpenGoalWithoutActiveIntent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stalled {
+		t.Fatal("open intent must not be reported as stalled")
+	}
+
+	if ok, err := es.ClaimIntent(intentID, "worker-1"); err != nil || !ok {
+		t.Fatalf("claim intent: ok=%v err=%v", ok, err)
+	}
+	stalled, err = es.OpenGoalWithoutActiveIntent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stalled {
+		t.Fatal("running intent must not be reported as stalled")
+	}
+
+	if err := es.SetIntentState(intentID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	stalled, err = es.OpenGoalWithoutActiveIntent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stalled {
+		t.Fatal("open goal without open/running intent should be reported as stalled")
+	}
+}
+
+func TestAddFactYieldedAtomicallyCreatesFactAndEdge(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	expID, err := d.CreateExploration("test", "personal delivery fact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	es := d.Exploration(expID)
+
+	intentID, err := es.AddIntent(map[string]any{"summary": "produce a result"}, 5, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalID, err := es.AddGoal(map[string]any{"text": "deliver the result"}, "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	factID, err := es.AddFactYielded(intentID, map[string]any{
+		"summary": "personal task delivery",
+		"detail":  "the complete result",
+	}, "worker-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := es.FactsYielded(intentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 || facts[0] != factID {
+		t.Fatalf("yielded facts=%v, want [%d]", facts, factID)
+	}
+	var edgeCount int
+	if err := d.QueryRow(`
+SELECT COUNT(*) FROM exploration_edges
+WHERE exploration_id=$1 AND src_id=$2 AND rel=$3 AND dst_id=$4`,
+		expID, intentID, RelYields, factID).Scan(&edgeCount); err != nil {
+		t.Fatal(err)
+	}
+	if edgeCount != 1 {
+		t.Fatalf("intent--yields-->fact edge count=%d, want 1", edgeCount)
+	}
+	node, err := es.GetNode(factID)
+	if err != nil || node == nil || node.Kind != KindFact || node.State != "confirmed" || node.Origin != "worker-1" {
+		t.Fatalf("unexpected fact node: node=%+v err=%v", node, err)
+	}
+
+	if _, err := es.AddFactYielded(goalID, map[string]any{"summary": "wrong source"}, "worker-1", nil); err == nil {
+		t.Fatal("AddFactYielded accepted a non-intent source")
+	}
+	if _, err := es.AddFactYielded(intentID+goalID+1000000, map[string]any{"summary": "missing source"}, "worker-1", nil); err == nil {
+		t.Fatal("AddFactYielded accepted a missing source")
+	}
+	facts, err = es.FactsYielded(intentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("failed calls left extra facts: %v", facts)
+	}
+}
+
 func TestIntentPauseResumeAndCancelCleanup(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {

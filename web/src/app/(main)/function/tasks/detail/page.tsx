@@ -5,7 +5,16 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, PauseIcon, PlayIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ArrowLeftIcon,
+  BrainIcon,
+  CheckIcon,
+  CircleAlertIcon,
+  PauseIcon,
+  PlayIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
@@ -36,31 +45,22 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { api } from "@/lib/api";
+import { api, HttpError } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
-import { AssetsTab } from "./_tabs/assets-tab";
 import { BroadcastTab } from "./_tabs/broadcast-tab";
-import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
-import { FindingsTab } from "./_tabs/findings-tab";
 import { GraphTab } from "./_tabs/graph-tab";
 import { InterceptTab } from "./_tabs/intercept-tab";
 import { OverviewTab } from "./_tabs/overview-tab";
-import { ReportTab } from "./_tabs/report-tab";
-import { RetestsTab } from "./_tabs/retests-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
+import { WorkExecutionDetail } from "./_components/work-execution-detail";
 
 const TABS = [
   { value: "sessions", label: "会话" },
   { value: "overview", label: "总览" },
-  { value: "graph", label: "探索链路" },
+  { value: "graph", label: "执行活动" },
   { value: "broadcast", label: "播报板" },
-  { value: "findings", label: "发现" },
-  { value: "retests", label: "复测" },
-  { value: "assets", label: "测试资产" },
-  { value: "coverage", label: "资产覆盖图" },
-  { value: "intercept", label: "拦截审批" },
-  { value: "report", label: "报告" },
+  { value: "intercept", label: "待确认操作" },
 ];
 
 function taskProfileIDs(task: Task): string[] {
@@ -202,24 +202,36 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
   );
 }
 
-function TaskDetailInner() {
+function TaskDetailInner({ id }: { id: string }) {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const id = searchParams.get("id") ?? "";
   const [task, setTask] = React.useState<Task | null>(null);
   const [paused, setPaused] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
+  const [loadError, setLoadError] = React.useState("");
+  const [taskNotFound, setTaskNotFound] = React.useState(false);
+  const [statsError, setStatsError] = React.useState("");
   const [tab, setTab] = React.useState("sessions");
   const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
+  const [profilesError, setProfilesError] = React.useState("");
   const [archiving, setArchiving] = React.useState(false);
 
-  React.useEffect(() => {
+  const reloadProfiles = React.useCallback(() => {
+    setProfilesError("");
     api
       .llmProfiles()
-      .then(setProfiles)
-      .catch(() => setProfiles([]));
+      .then((rows) => {
+        setProfiles(rows);
+        setProfilesError("");
+      })
+      .catch((error) => {
+        setProfilesError((error as Error).message || "LLM 配置列表读取失败");
+      });
   }, []);
+
+  React.useEffect(() => {
+    reloadProfiles();
+  }, [reloadProfiles]);
 
   React.useEffect(() => {
     let alive = true;
@@ -244,23 +256,20 @@ function TaskDetailInner() {
   const load = React.useCallback(() => {
     if (taskLoadInFlight.current === id) return;
     taskLoadInFlight.current = id;
-    Promise.all([api.task(id), api.stats(id).catch(() => null)])
-      .then(([task, s]) => {
+    const taskRequest = api
+      .task(id)
+      .then((next) => {
         if (taskLoadInFlight.current !== id) return;
-        const base = { ...task };
-        const at = s?.active_task;
-        if (at) {
-          base.in_flight = at.in_flight;
-          base.goals_total = at.goals_total;
-          base.goals_met = at.goals_met;
-          base.engine_mode = s?.engine_mode ?? at.engine_mode;
-          base.paused = at.paused;
-        }
-        setTask(base);
-        setPaused(at?.paused ?? base.paused ?? false);
+        setTask(next);
+        setPaused(next.paused ?? false);
+        setLoadError("");
+        setTaskNotFound(false);
       })
-      .catch(() => {
-        // Keep the last rendered task state during a transient poll failure.
+      .catch((error) => {
+        if (taskLoadInFlight.current !== id) return;
+        const message = (error as Error).message || "任务读取失败";
+        setLoadError(message);
+        setTaskNotFound(error instanceof HttpError && (error.status === 404 || error.status === 410));
       })
       .finally(() => {
         if (taskLoadInFlight.current === id) {
@@ -268,6 +277,29 @@ function TaskDetailInner() {
           setLoaded(true);
         }
       });
+    const statsRequest = api
+      .stats(id)
+      .then((stats) => {
+        const at = stats.active_task;
+        setStatsError("");
+        setTask((base) => {
+          if (!base) return base;
+          const next = { ...base };
+          if (at) {
+            next.in_flight = at.in_flight;
+            next.goals_total = at.goals_total;
+            next.goals_met = at.goals_met;
+            next.engine_mode = stats.engine_mode ?? at.engine_mode;
+            next.paused = at.paused;
+          }
+          return next;
+        });
+        if (at && typeof at.paused === "boolean") setPaused(at.paused);
+      })
+      .catch((error) => {
+        setStatsError((error as Error).message || "任务统计读取失败");
+      });
+    return Promise.allSettled([taskRequest, statsRequest]);
   }, [id]);
   React.useEffect(() => {
     load();
@@ -301,16 +333,54 @@ function TaskDetailInner() {
   }
 
   if (!task) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
-        <p className="text-muted-foreground">{loaded ? `任务 ${id} 已被删除、归档或不存在` : "加载中…"}</p>
-        {loaded && (
+    if (!loaded) {
+      return (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
+          <p className="text-muted-foreground">加载中…</p>
+        </div>
+      );
+    }
+    if (!loadError) {
+      return (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
+          <p className="text-muted-foreground">任务不存在或当前不可访问</p>
           <Button asChild variant="outline">
             <Link href="/function/tasks">
               <ArrowLeftIcon /> 返回任务列表
             </Link>
           </Button>
-        )}
+        </div>
+      );
+    }
+    if (!taskNotFound) {
+      return (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
+          <CircleAlertIcon className="size-8 text-destructive" />
+          <div>
+            <p className="font-medium">任务读取失败</p>
+            <p className="text-muted-foreground mt-1 max-w-lg text-sm">{loadError}</p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => load()}>
+              <RefreshCwIcon /> 重试
+            </Button>
+            <Button asChild variant="ghost">
+              <Link href="/function/tasks">
+                <ArrowLeftIcon /> 返回任务列表
+              </Link>
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
+        <p className="text-muted-foreground">任务 {id} 已被删除、归档或不存在</p>
+        <Button asChild variant="outline">
+          <Link href="/function/tasks">
+            <ArrowLeftIcon /> 返回任务列表
+          </Link>
+        </Button>
       </div>
     );
   }
@@ -374,7 +444,7 @@ function TaskDetailInner() {
                 <AlertDialogHeader>
                   <AlertDialogTitle>归档任务 #{task.id}？</AlertDialogTitle>
                   <AlertDialogDescription>
-                    任务图谱、关联记录、独占资产与流量、工作文件和 LLM
+                    执行活动、关联记录、工作文件、资料和 LLM
                     历史将压缩到冷存储。归档完成后可在任务列表的“已归档”页还原。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
@@ -405,7 +475,7 @@ function TaskDetailInner() {
               <TabsTrigger key={t.value} value={t.value}>
                 {t.label}
                 {t.value === "intercept" && interceptPendingCount > 0 && (
-                  <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white">
+                  <span className="ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500 px-1 text-xs font-semibold leading-none text-white">
                     {interceptPendingCount > 99 ? "99+" : interceptPendingCount}
                   </span>
                 )}
@@ -417,6 +487,42 @@ function TaskDetailInner() {
 
       {/* Tab content */}
       <div className="flex-1 p-4 lg:p-6">
+        {loadError && (
+          <Alert className="mb-4" variant="destructive">
+            <CircleAlertIcon />
+            <AlertTitle>任务信息刷新失败</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+              <span>当前展示的是上一次成功读取的数据：{loadError}</span>
+              <Button size="sm" variant="outline" onClick={() => void load()}>
+                <RefreshCwIcon /> 重试
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
+        {statsError && (
+          <Alert className="mb-4" variant="destructive">
+            <CircleAlertIcon />
+            <AlertTitle>任务统计暂不可用</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+              <span>任务基础信息仍可查看：{statsError}</span>
+              <Button size="sm" variant="outline" onClick={() => void load()}>
+                <RefreshCwIcon /> 重试
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
+        {profilesError && (
+          <Alert className="mb-4" variant="destructive">
+            <CircleAlertIcon />
+            <AlertTitle>LLM 配置列表读取失败</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+              <span>任务内容不受影响，但暂时无法切换模型配置：{profilesError}</span>
+              <Button size="sm" variant="outline" onClick={reloadProfiles}>
+                <RefreshCwIcon /> 重试
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
         <TabsContent value="sessions" className="mt-0">
           <SessionsTab taskId={id} />
         </TabsContent>
@@ -429,23 +535,8 @@ function TaskDetailInner() {
         <TabsContent value="broadcast" className="mt-0">
           <BroadcastTab taskId={id} />
         </TabsContent>
-        <TabsContent value="findings" className="mt-0">
-          <FindingsTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="retests" className="mt-0">
-          <RetestsTab key={id} taskId={id} />
-        </TabsContent>
-        <TabsContent value="assets" className="mt-0">
-          <AssetsTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="coverage" className="mt-0">
-          <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />
-        </TabsContent>
         <TabsContent value="intercept" className="mt-0">
           <InterceptTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="report" className="mt-0">
-          <ReportTab taskId={id} />
         </TabsContent>
       </div>
     </Tabs>
@@ -456,7 +547,21 @@ function TaskDetailInner() {
 export default function TaskDetailPage() {
   return (
     <React.Suspense fallback={null}>
-      <TaskDetailInner />
+      <TaskDetailRoute />
     </React.Suspense>
   );
+}
+
+function TaskDetailRoute() {
+  const searchParams = useSearchParams();
+  const workTaskID = Number(searchParams.get("work_task") || 0);
+  if (Number.isSafeInteger(workTaskID) && workTaskID > 0) {
+    return (
+      <WorkExecutionDetail
+        workTaskID={workTaskID}
+        artexTaskID={searchParams.get("id") || undefined}
+      />
+    );
+  }
+  return <TaskDetailInner id={searchParams.get("id") ?? ""} />;
 }

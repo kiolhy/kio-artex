@@ -238,7 +238,25 @@ func (s *Server) pgListAgents(w http.ResponseWriter, r *http.Request) {
 			dtos[i].ToolCount = tools[ags[i].Key]
 		}
 	}
+	visibleAgents := make([]*db.Agent, 0, len(ags))
+	visibleDTOs := make([]AgentDTO, 0, len(dtos))
+	for i, a := range ags {
+		if a.Builtin && legacySecurityAgentKeys[a.Key] {
+			continue
+		}
+		visibleAgents = append(visibleAgents, a)
+		visibleDTOs = append(visibleDTOs, dtos[i])
+	}
+	ags, dtos = visibleAgents, visibleDTOs
 	writeJSON(w, 200, map[string]any{"agents": dtos})
+}
+
+// legacySecurityAgentKeys remain in the database for historical references but
+// are not part of the personal workspace product surface.
+var legacySecurityAgentKeys = map[string]bool{
+	"pentest":  true,
+	"reporter": true,
+	"retester": true,
 }
 
 // pgCreateAgent creates a CUSTOM conversational agent (builtin=false, role
@@ -1536,7 +1554,7 @@ func skillRelPath(file string) (string, string) {
 	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
 		return "", "invalid path"
 	}
-	return clean, ""
+	return filepath.ToSlash(clean), ""
 }
 
 // walkSkillFiles returns all files under root (relative to root), sorted,

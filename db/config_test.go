@@ -17,7 +17,13 @@ func TestPoolProfilesOrder(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer d.Close()
+	// t.Cleanup is LIFO: close after the profile cleanups registered below.
+	t.Cleanup(func() { d.Close() })
+	for _, name := range []string{"t-pool-lo", "t-pool-hi", "t-pool-excluded", "t-pool-nokey"} {
+		if _, err := d.Exec(`DELETE FROM llm_profiles WHERE name=$1`, name); err != nil {
+			t.Fatalf("clean stale profile %q: %v", name, err)
+		}
+	}
 
 	mk := func(name string, priority int, exclude bool, key string) int64 {
 		id, err := d.SaveProfile(&LLMProfile{

@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import {
+  AlertCircleIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   ArrowUpToLineIcon,
@@ -17,6 +18,7 @@ import {
   type LucideIcon,
   PauseIcon,
   PlayIcon,
+  RefreshCwIcon,
   SearchIcon,
   TargetIcon,
 } from "lucide-react";
@@ -61,19 +63,19 @@ const KIND_META: Record<string, KindMeta> = {
     chip: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
   },
   intent: {
-    label: "意图",
+    label: "工作项",
     icon: CompassIcon,
     dot: "bg-blue-500",
     chip: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
   },
   fact: {
-    label: "事实",
+    label: "资料",
     icon: FlaskConicalIcon,
     dot: "bg-amber-500",
     chip: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
   },
   finding: {
-    label: "漏洞",
+    label: "结果",
     icon: BugIcon,
     dot: "bg-rose-500",
     chip: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
@@ -230,7 +232,7 @@ function AssetList({ assets, dense = false }: { assets: FindingAsset[]; dense?: 
               )}
               title={`${typeLabel} · ${a.label}`}
             >
-              <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">{typeLabel}</span>
+              <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">{typeLabel}</span>
               <code className="truncate font-mono text-xs">{a.label}</code>
             </li>
           );
@@ -264,7 +266,7 @@ function RelatedNodeCard({ node, assets }: { node: TaskNode; assets: FindingAsse
       </div>
       <p className="line-clamp-4 text-xs break-words">{summary || "（无摘要）"}</p>
       <AssetList assets={assets} dense />
-      <pre className="max-h-40 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px] whitespace-pre-wrap">
+      <pre className="max-h-40 overflow-auto rounded border bg-muted/40 p-2 font-mono text-xs whitespace-pre-wrap">
         {prettyPayload(node.payload)}
       </pre>
     </div>
@@ -350,7 +352,7 @@ function BroadcastRow({
       {/* 时间列 */}
       <div className="py-3 text-right text-xs text-muted-foreground tabular-nums">
         <div>{Number.isNaN(ts) ? "--:--:--" : clockFmt.format(ts)}</div>
-        <div className="text-[11px] opacity-70">{relTime(ts, now)}</div>
+        <div className="text-xs opacity-70">{relTime(ts, now)}</div>
       </div>
 
       {/* 时间轴:竖线 + 类型圆点 */}
@@ -385,7 +387,7 @@ function BroadcastRow({
                 <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">P{node.priority}</span>
               )}
               {fresh && (
-                <span className="rounded bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">
+                <span className="rounded bg-primary px-1.5 py-0.5 text-xs font-semibold text-primary-foreground">
                   新
                 </span>
               )}
@@ -446,6 +448,8 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
   const [assets, setAssets] = React.useState<Record<string, FindingAsset[]>>({});
   const [total, setTotal] = React.useState(0);
   const [loaded, setLoaded] = React.useState(false);
+  const [loadError, setLoadError] = React.useState("");
+  const [retryNonce, setRetryNonce] = React.useState(0);
   const [freshIDs, setFreshIDs] = React.useState<Set<string>>(new Set());
   const [pending, setPending] = React.useState(0);
   const [now, setNow] = React.useState(0);
@@ -509,9 +513,13 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
             setPending(base === null ? 0 : Math.max(0, r.total - base));
           }
           setLoaded(true);
+          setLoadError("");
         })
-        .catch(() => {
-          // 轮询是尽力而为:保留上一次成功的播报内容,下一轮自动重试。
+        .catch((error) => {
+          if (!alive) return;
+          // 首次失败必须显式报错;轮询失败则保留上一次成功内容并提示。
+          setLoadError((error as Error).message || "播报读取失败");
+          setLoaded(true);
         });
     void load();
     if (!live) {
@@ -524,7 +532,13 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
       alive = false;
       clearInterval(timer);
     };
-  }, [taskId, page, size, kinds, query, order, live, atLive]);
+  }, [taskId, page, size, kinds, query, order, live, atLive, retryNonce]);
+
+  const retry = () => {
+    setLoadError("");
+    if (items.length === 0) setLoaded(false);
+    setRetryNonce((value) => value + 1);
+  };
 
   const toggleKind = (kind: ExploreKind) => {
     setKinds((cur) => (cur.includes(kind) ? cur.filter((k) => k !== kind) : [...cur, kind]));
@@ -650,6 +664,19 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
         </button>
       )}
 
+      {loadError && items.length > 0 && (
+        <div
+          className="flex flex-wrap items-center justify-center gap-2 border-b bg-amber-50 px-4 py-2 text-sm text-amber-800"
+          role="alert"
+        >
+          <AlertCircleIcon className="size-4" />
+          <span>刷新失败，当前仍显示上一次成功加载的播报：{loadError}</span>
+          <Button variant="outline" size="sm" className="h-7" onClick={retry}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+
       <CardContent className="px-4 py-0">
         {!loaded ? (
           <div className="flex flex-col gap-3 py-4">
@@ -657,9 +684,20 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
               <Skeleton key={i} className="h-12 w-full" />
             ))}
           </div>
+        ) : loadError && items.length === 0 ? (
+          <div className="flex flex-col items-center gap-3 py-12 text-center" role="alert">
+            <AlertCircleIcon className="size-7 text-destructive" />
+            <div>
+              <p className="text-sm font-medium text-destructive">播报读取失败</p>
+              <p className="mt-1 text-sm text-muted-foreground">{loadError}</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={retry}>
+              <RefreshCwIcon /> 重试
+            </Button>
+          </div>
         ) : items.length === 0 ? (
           <p className="py-10 text-center text-sm text-muted-foreground">
-            {query || kinds.length > 0 ? "没有符合条件的播报。" : "这个任务还没有产生探索节点。"}
+            {query || kinds.length > 0 ? "没有符合条件的播报。" : "这个任务还没有产生执行活动。"}
           </p>
         ) : (
           groups.map((group) => (

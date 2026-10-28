@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import {
+  AlertCircleIcon,
   ArrowUpIcon,
   Bot,
   ChevronDownIcon,
@@ -15,6 +16,7 @@ import {
   PinIcon,
   PinOffIcon,
   PlusIcon,
+  RefreshCwIcon,
   Square,
   Trash2Icon,
   XIcon,
@@ -135,7 +137,7 @@ function groupByAgent(conversations: Conversation[], agentByKey: Map<string, Age
 // console — shown while a turn is streaming.
 function LiveBadge() {
   return (
-    <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+    <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400">
       <span className="size-1 animate-pulse rounded-full bg-blue-500" />
       实时
     </span>
@@ -201,9 +203,10 @@ function Composer({
               {onRemoveAttachment && (
                 <button
                   type="button"
-                  className="ml-0.5 text-muted-foreground hover:text-foreground"
+                  className="-my-2 ml-0.5 inline-flex size-10 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground sm:my-0 sm:size-6"
                   onClick={() => onRemoveAttachment(a.path)}
                   title="移除"
+                  aria-label={`移除附件 ${a.name}`}
                 >
                   <XIcon className="size-3" />
                 </button>
@@ -232,9 +235,11 @@ function Composer({
             <Button
               size="icon"
               variant="ghost"
+              className="size-11 sm:size-8"
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled || uploading}
               title="上传文件"
+              aria-label="上传文件"
             >
               {uploading ? <Loader2Icon className="size-4 animate-spin" /> : <PaperclipIcon className="size-4" />}
             </Button>
@@ -250,19 +255,34 @@ function Composer({
           onKeyDown={onKeyDown}
         />
         {running && allowBtw && isBtwCommand(value) && (
-          <Button size="icon" onClick={onSend} aria-label="发送旁路问题" title="发送旁路问题">
+          <Button
+            size="icon"
+            className="size-11 sm:size-8"
+            onClick={onSend}
+            aria-label="发送旁路问题"
+            title="发送旁路问题"
+          >
             <ArrowUpIcon />
           </Button>
         )}
         {running ? (
           // while a run is in flight the send button becomes a stop button —
           // aborts just this session (the trigger queue keeps going).
-          <Button size="icon" variant="destructive" onClick={onStop} disabled={stopDisabled} title="停止本次运行">
+          <Button
+            size="icon"
+            variant="destructive"
+            className="size-11 sm:size-8"
+            onClick={onStop}
+            disabled={stopDisabled}
+            title="停止本次运行"
+            aria-label="停止本次运行"
+          >
             <Square className="size-3.5 fill-current" />
           </Button>
         ) : (
           <Button
             size="icon"
+            className="size-11 sm:size-8"
             onClick={onSend}
             disabled={disabled || (!value.trim() && atts.length === 0)}
             title="发送消息"
@@ -314,7 +334,7 @@ function LLMProfileRow({
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" className="w-64 p-1">
-          <p className="text-muted-foreground px-2 py-1 text-[11px] font-medium">选择 LLM 配置</p>
+          <p className="text-muted-foreground px-2 py-1 text-xs font-medium">选择 LLM 配置</p>
           {/* default option */}
           <button
             type="button"
@@ -329,7 +349,7 @@ function LLMProfileRow({
           >
             <span className="text-sm">默认{activeDefault ? `（${activeDefault.name}）` : ""}</span>
             {activeDefault && (
-              <span className="text-muted-foreground text-[11px]">
+              <span className="text-muted-foreground text-xs">
                 {activeDefault.format} · {activeDefault.model}
               </span>
             )}
@@ -348,7 +368,7 @@ function LLMProfileRow({
               )}
             >
               <span className="text-sm">{p.name}</span>
-              <span className="text-muted-foreground text-[11px]">
+              <span className="text-muted-foreground text-xs">
                 {p.format} · {p.model}
               </span>
             </button>
@@ -379,9 +399,9 @@ function DraftChat({
   const [sending, setSending] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
 
-  // default the agent to Auto once agents load.
+  // The main agent owns personal-task handoff, so it is the safe default.
   React.useEffect(() => {
-    if (!agentKey && agents.some((a) => a.key === "auto")) setAgentKey("auto");
+    if (!agentKey && agents.some((a) => a.key === "mainagent")) setAgentKey("mainagent");
   }, [agentKey, agents]);
 
   const agent = agents.find((a) => a.key === agentKey);
@@ -431,7 +451,7 @@ function DraftChat({
                 <Bot className="size-3.5" />
                 {a.name}
                 {!a.builtin && (
-                  <Badge variant="outline" className="px-1 py-0 text-[9px]">
+                  <Badge variant="outline" className="px-1.5 py-0 text-xs">
                     自定义
                   </Badge>
                 )}
@@ -508,6 +528,10 @@ function ChatView({
   const hasMoreRef = React.useRef(false); // older history remains above the loaded window
   const loadingMoreRef = React.useRef(false); // guard: one scroll-up load at a time
   const [historyLoaded, setHistoryLoaded] = React.useState(false);
+  const [historyError, setHistoryError] = React.useState("");
+  const [historyReloadTick, setHistoryReloadTick] = React.useState(0);
+  const [liveError, setLiveError] = React.useState("");
+  const [liveRetryTick, setLiveRetryTick] = React.useState(0);
   const [hasMore, setHasMore] = React.useState(false); // drives the "load earlier" hint
   const agent = agents.find((a) => a.key === conv.agent_key);
   const currentProfileId = conv.llm_profile_id ?? null;
@@ -546,6 +570,7 @@ function ChatView({
     setHasMore(false);
     setMessages([]);
     setHistoryLoaded(false);
+    setHistoryError("");
     setRunning(false);
     let live = true;
     api
@@ -558,17 +583,18 @@ function ChatView({
         hasMoreRef.current = r.hasMore;
         setHasMore(r.hasMore);
         setRunning((current) => current || r.running);
+        setHistoryError("");
         setHistoryLoaded(true);
       })
-      .catch(() => {
-        // A source link can retry history through its locator; ordinary chats
-        // retain the existing usable empty state on a transient failure.
-        if (live) setHistoryLoaded(true);
+      .catch((error) => {
+        if (!live) return;
+        setHistoryError((error as Error).message || "对话历史读取失败");
+        setHistoryLoaded(true);
       });
     return () => {
       live = false;
     };
-  }, [conv.id]);
+  }, [conv.id, historyReloadTick]);
 
   // A trigger or another tab may start a turn while this conversation is open.
   // A false list snapshot must not stop the tail before its final messages load.
@@ -592,9 +618,10 @@ function ChatView({
         cursorRef.current = Math.max(cursorRef.current, r.cursor);
         keepPolling = r.running;
         setRunning(r.running);
+        setLiveError("");
         if (!r.running) onTitleMaybeChanged(); // first-turn auto-title landed
-      } catch {
-        /* transient — keep polling */
+      } catch (error) {
+        if (live) setLiveError((error as Error).message || "实时消息同步中断");
       } finally {
         // Slow responses must not overlap another poll with the same cursor.
         if (live && keepPolling) timer = setTimeout(() => void tick(), 1000);
@@ -605,7 +632,7 @@ function ChatView({
       live = false;
       clearTimeout(timer);
     };
-  }, [running, conv.id, onTitleMaybeChanged]);
+  }, [running, conv.id, onTitleMaybeChanged, liveRetryTick]);
 
   const loadFocusPage = React.useCallback((before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE), [conv.id]);
   const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
@@ -767,7 +794,7 @@ function ChatView({
         <span className="min-w-0 max-w-48 truncate text-sm font-medium">{agent?.name ?? conv.agent_key}</span>
         <span className="text-muted-foreground hidden shrink-0 font-mono text-xs sm:inline">{conv.agent_key}</span>
         {agent && !agent.builtin && (
-          <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
+          <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-xs">
             自定义
           </Badge>
         )}
@@ -792,17 +819,48 @@ function ChatView({
 
       <ApprovalExecutionFocus focus={approvalFocus} history={focusHistory} />
 
+      {liveError && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-800">
+          <span>实时消息同步中断：{liveError}。系统会自动重试。</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-10 sm:h-7"
+            onClick={() => setLiveRetryTick((n) => n + 1)}
+          >
+            <RefreshCwIcon /> 立即重试
+          </Button>
+        </div>
+      )}
+
       {/* messages */}
       <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
         <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
-          {messages.length === 0 && !running ? (
+          {!historyLoaded ? (
+            <div className="text-muted-foreground flex items-center justify-center gap-2 py-10 text-sm">
+              <Loader2Icon className="size-4 animate-spin" /> 对话历史加载中…
+            </div>
+          ) : historyError ? (
+            <div className="flex flex-col items-center gap-3 py-10 text-center">
+              <AlertCircleIcon className="size-6 text-destructive" />
+              <p className="text-destructive text-sm">对话历史读取失败：{historyError}</p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-10 sm:h-7"
+                onClick={() => setHistoryReloadTick((n) => n + 1)}
+              >
+                <RefreshCwIcon /> 重试
+              </Button>
+            </div>
+          ) : messages.length === 0 && !running ? (
             <div className="text-muted-foreground py-10 text-center text-sm">
               开始和「{agent?.name ?? conv.agent_key}」对话
             </div>
           ) : (
             <>
               {hasMore && (
-                <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
+                <div className="text-muted-foreground/70 pb-2 text-center text-xs">向上滚动加载更早的消息…</div>
               )}
               <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
             </>
@@ -937,7 +995,7 @@ const ConversationItem = React.memo(function ConversationItem({
               </Badge>
             ) : null}
           </div>
-          <div className="text-muted-foreground flex min-w-0 items-center gap-1 text-[11px]">
+          <div className="text-muted-foreground flex min-w-0 items-center gap-1 text-xs">
             {showAgent && (
               <>
                 <Bot className="size-3 shrink-0" />
@@ -962,7 +1020,7 @@ const ConversationItem = React.memo(function ConversationItem({
           <Button
             variant="ghost"
             size="icon-sm"
-            className="text-muted-foreground shrink-0"
+            className="size-11 shrink-0 text-muted-foreground sm:size-7"
             aria-label={`管理对话「${conv.title || "新对话"}」`}
           >
             <MoreHorizontalIcon />
@@ -1024,7 +1082,7 @@ function AgentGroupHeader({
       aria-expanded={!collapsed}
       title={collapsed ? `展开「${group.name}」` : `收起「${group.name}」`}
       className={cn(
-        "sticky top-0 z-10 flex min-w-0 items-center gap-1.5 rounded-md bg-card px-1.5 py-1 text-left font-medium text-[11px] transition-colors hover:bg-accent/50",
+        "sticky top-0 z-10 flex min-w-0 items-center gap-1.5 rounded-md bg-card px-1.5 py-1 text-left font-medium text-xs transition-colors hover:bg-accent/50",
         collapsed && hasActive ? "text-foreground" : "text-muted-foreground",
       )}
     >
@@ -1050,6 +1108,7 @@ export default function ChatPage() {
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
   const [sourceRequested, setSourceRequested] = React.useState(false);
   const [convsLoaded, setConvsLoaded] = React.useState(false);
+  const [convsError, setConvsError] = React.useState("");
   const selectConversation = React.useCallback((id: number | null) => {
     if (id !== selectedId) {
       const url = new URL(window.location.href);
@@ -1085,9 +1144,16 @@ export default function ChatPage() {
     const seq = ++conversationListSeq.current;
     try {
       const items = await api.conversations();
-      if (seq === conversationListSeq.current) { setConvs(items); setConvsLoaded(true); }
-    } catch {
-      // Preserve the selected transcript and list on a transient poll failure.
+      if (seq === conversationListSeq.current) {
+        setConvs(items);
+        setConvsLoaded(true);
+        setConvsError("");
+      }
+    } catch (e) {
+      if (seq !== conversationListSeq.current) return;
+      // Keep an already-loaded list visible during a transient poll failure. If the
+      // first load fails, the empty list must not be presented as "no conversations".
+      setConvsError((e as Error).message || "对话列表读取失败");
     }
   }, []);
   React.useEffect(() => {
@@ -1197,10 +1263,15 @@ export default function ChatPage() {
       ),
     [visibleConversations, agentByKey],
   );
-  // conversation agents: custom agents + conversational built-ins (role=assistant,
-  // e.g. Auto / 渗透测试). The orchestration built-ins (goals/planner/mainagent/worker)
-  // are task-specific and stay hidden from the chat page.
-  const chatAgents = React.useMemo(() => agents.filter((a) => !a.builtin || a.role === "assistant"), [agents]);
+  // Conversation agents: the main personal agent, custom agents, and generic
+  // assistant built-ins. Internal orchestration roles stay hidden.
+  const chatAgents = React.useMemo(
+    () =>
+      agents.filter(
+        (a) => a.key === "mainagent" || !a.builtin || (a.role === "assistant" && a.key !== "pentest"),
+      ),
+    [agents],
+  );
   const agentFilterOptions = React.useMemo(() => {
     const counts = new Map<string, number>();
     for (const conversation of convs) {
@@ -1354,7 +1425,7 @@ export default function ChatPage() {
         {/* left: conversation list */}
         <div className="bg-card flex flex-col overflow-hidden rounded-lg border">
           <div className="flex flex-col gap-2 border-b p-2">
-            <Button size="sm" className="w-full" onClick={() => selectConversation(null)}>
+            <Button size="sm" className="h-11 w-full sm:h-7" onClick={() => selectConversation(null)}>
               <PlusIcon /> 新建对话
             </Button>
             <Select
@@ -1362,7 +1433,7 @@ export default function ChatPage() {
               onValueChange={(value) => changeAgentFilter(value === "all" ? null : value.slice(6))}
               disabled={bulkDeleting}
             >
-              <SelectTrigger size="sm" className="w-full min-w-0" aria-label="按 Agent 筛选对话">
+              <SelectTrigger size="sm" className="h-11 w-full min-w-0 sm:h-7" aria-label="按 Agent 筛选对话">
                 <Bot />
                 <SelectValue placeholder="全部 Agent" />
               </SelectTrigger>
@@ -1393,6 +1464,7 @@ export default function ChatPage() {
                     <Button
                       size="sm"
                       variant="destructive"
+                      className="h-11 sm:h-7"
                       disabled={bulkDeleting}
                       onClick={() => setBulkDeleteOpen(true)}
                     >
@@ -1400,7 +1472,7 @@ export default function ChatPage() {
                       删除
                     </Button>
                   )}
-                  <Button size="sm" variant="ghost" onClick={exitSelectionMode}>
+                  <Button size="sm" variant="ghost" className="h-11 sm:h-7" onClick={exitSelectionMode}>
                     完成
                   </Button>
                 </div>
@@ -1412,7 +1484,7 @@ export default function ChatPage() {
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="text-muted-foreground"
+                    className="h-11 text-muted-foreground sm:h-7"
                     onClick={() => setSelectionMode(true)}
                     disabled={filteredConversations.length === 0}
                   >
@@ -1428,7 +1500,45 @@ export default function ChatPage() {
             className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
           >
             <div className="flex min-w-0 flex-col gap-0.5 p-2">
-              {filteredConversations.length === 0 && (
+              {convsError && convs.length > 0 && (
+                <div className="mb-1 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
+                  <AlertCircleIcon className="size-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate" title={convsError}>
+                    列表刷新失败，正在显示上次结果
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-10 px-3 sm:h-7 sm:px-2"
+                    onClick={() => void reloadConvs()}
+                  >
+                    重试
+                  </Button>
+                </div>
+              )}
+              {filteredConversations.length === 0 && !convsError && !convsLoaded && (
+                <p className="text-muted-foreground flex items-center justify-center gap-2 px-2 py-6 text-center text-xs">
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                  正在读取对话…
+                </p>
+              )}
+              {filteredConversations.length === 0 && convsError && (
+                <div className="flex flex-col items-center gap-2 px-2 py-6 text-center">
+                  <AlertCircleIcon className="text-destructive size-5" />
+                  <p className="text-sm font-medium">对话列表读取失败</p>
+                  <p className="text-muted-foreground max-w-56 text-xs">{convsError}</p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-10 sm:h-7"
+                    onClick={() => void reloadConvs()}
+                  >
+                    <RefreshCwIcon data-icon="inline-start" />
+                    重试
+                  </Button>
+                </div>
+              )}
+              {filteredConversations.length === 0 && !convsError && convsLoaded && (
                 <p className="text-muted-foreground px-2 py-6 text-center text-xs">
                   {agentFilter === null ? "暂无对话" : "该 Agent 暂无对话"}
                 </p>
@@ -1493,7 +1603,7 @@ export default function ChatPage() {
                   type="button"
                   variant="ghost"
                   size="sm"
-                  className="mt-1 w-full"
+                  className="mt-1 h-11 w-full sm:h-7"
                   onClick={() => setVisibleConversationCount((count) => count + CONVERSATION_LIST_PAGE)}
                 >
                   加载更多

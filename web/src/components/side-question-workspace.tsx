@@ -40,7 +40,13 @@ const preparationLabels = {
 export function SideQuestionButton({ side }: { side: SideQuestions }) {
   if (!side.enabled) return null;
   return (
-    <Button variant="outline" size="sm" onClick={() => side.setOpen(true)} title="/btw 旁路提问">
+    <Button
+      variant="outline"
+      size="sm"
+      className="h-10 sm:h-7"
+      onClick={() => side.setOpen(true)}
+      title="/btw 旁路提问"
+    >
       <MessageCircleQuestionIcon data-icon="inline-start" />
       旁路提问
     </Button>
@@ -78,13 +84,20 @@ function SidePanel({
         <Button
           variant="ghost"
           size="icon-sm"
+          className="size-10 sm:size-7"
           onClick={() => setConfirm(true)}
           disabled={!side.items.length || side.busy}
           aria-label="清空旁路历史"
         >
           <Trash2Icon />
         </Button>
-        <Button variant="ghost" size="icon-sm" onClick={() => side.setOpen(false)} aria-label="关闭旁路面板">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="size-10 sm:size-7"
+          onClick={() => side.setOpen(false)}
+          aria-label="关闭旁路面板"
+        >
           <XIcon />
         </Button>
       </div>
@@ -107,7 +120,7 @@ function SidePanel({
         className="min-h-0 flex-1 overflow-y-auto p-3"
       >
         {side.nextCursor > 0 && (
-          <Button variant="ghost" size="sm" onClick={() => void side.load(side.nextCursor)}>
+          <Button variant="ghost" size="sm" className="h-10 sm:h-7" onClick={() => void side.load(side.nextCursor)}>
             加载更早的旁路问答
           </Button>
         )}
@@ -159,10 +172,13 @@ function SidePanel({
             <AlertDescription>{side.error || side.snapshot?.reason}</AlertDescription>
           </Alert>
         )}
-        <InputGroup className={inlineComposer ? "min-h-10" : "min-h-9"}>
+        <InputGroup className={inlineComposer ? "min-h-11 sm:min-h-10" : "min-h-11 sm:min-h-9"}>
           <InputGroupTextarea
             rows={1}
-            className={cn("overflow-y-auto", inlineComposer ? "max-h-40 min-h-0" : "max-h-36 min-h-9")}
+            className={cn(
+              "overflow-y-auto",
+              inlineComposer ? "max-h-40 min-h-0" : "max-h-36 min-h-11 sm:min-h-9",
+            )}
             aria-label="旁路问题"
             placeholder="询问当前上下文…"
             value={side.draft}
@@ -180,7 +196,7 @@ function SidePanel({
             {!inlineComposer && <span className="text-muted-foreground text-xs">独立问答 · 无工具执行</span>}
             {side.running ? (
               <InputGroupButton
-                className="ml-auto"
+                className="ml-auto size-10 sm:size-6"
                 variant="destructive"
                 size="icon-xs"
                 onClick={() => void side.stop()}
@@ -190,7 +206,7 @@ function SidePanel({
               </InputGroupButton>
             ) : (
               <InputGroupButton
-                className="ml-auto"
+                className="ml-auto size-10 sm:size-6"
                 variant="default"
                 size="icon-xs"
                 onClick={() => void side.ask(side.draft)}

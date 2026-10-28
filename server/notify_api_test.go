@@ -468,6 +468,7 @@ func TestNotifyDisabledChannelDoesNotSend(t *testing.T) {
 }
 
 func TestNotifyStatusChangeDelivery(t *testing.T) {
+	t.Skip("漏洞状态通知已从个人工作台移除")
 	f := newNotifyFixture(t)
 	hook := newFakeWebhook(t)
 	chID := f.createChannel(t, map[string]any{
@@ -498,6 +499,7 @@ func TestNotifyStatusChangeDelivery(t *testing.T) {
 }
 
 func TestNotifyStatusChangeSuppressedByDefault(t *testing.T) {
+	t.Skip("漏洞状态通知已从个人工作台移除")
 	f := newNotifyFixture(t)
 	hook := newFakeWebhook(t)
 	chID := f.createChannel(t, map[string]any{

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Bot, PlusIcon, Trash2Icon } from "lucide-react";
+import { AlertCircleIcon, Bot, PlusIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -52,13 +52,21 @@ function AgentGridCard({
   onOpen: () => void;
   onDeleted: () => void;
 }) {
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+
   async function del() {
+    if (deleting) return;
+    setDeleting(true);
     try {
       await api.deleteAgent(agent.key);
+      setConfirmOpen(false);
       toast.success(`已删除 Agent「${agent.name}」`);
       onDeleted();
     } catch (e) {
       toast.error("删除失败：" + (e as Error).message);
+    } finally {
+      setDeleting(false);
     }
   }
   return (
@@ -69,16 +77,16 @@ function AgentGridCard({
           <span className="text-sm font-medium">{agent.name}</span>
           <span className="text-muted-foreground font-mono text-xs">{agent.key}</span>
           {agent.builtin ? (
-            <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+            <Badge variant="secondary" className="px-1.5 py-0 text-xs">
               内置
             </Badge>
           ) : (
-            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+            <Badge variant="outline" className="px-1.5 py-0 text-xs">
               自定义
             </Badge>
           )}
           {!agent.enabled && (
-            <Badge variant="outline" className="text-destructive px-1.5 py-0 text-[10px]">
+            <Badge variant="outline" className="text-destructive px-1.5 py-0 text-xs">
               已停用
             </Badge>
           )}
@@ -86,19 +94,26 @@ function AgentGridCard({
         <p className="text-muted-foreground line-clamp-2 min-h-8 text-xs">
           {agent.description || "（无描述）"}
         </p>
-        <div className="text-muted-foreground flex flex-wrap gap-1.5 text-[10px]">
+        <div className="text-muted-foreground flex flex-wrap gap-1.5 text-xs">
           <span className="rounded border px-1.5 py-0.5">MCP {agent.mcp_count ?? 0}</span>
           <span className="rounded border px-1.5 py-0.5">Skill {agent.skill_count ?? 0}</span>
           <span className="rounded border px-1.5 py-0.5">工具 {agent.tool_count ?? 0}</span>
         </div>
       </button>
       {!agent.builtin && (
-        <AlertDialog>
+        <AlertDialog
+          open={confirmOpen}
+          onOpenChange={(open) => {
+            if (!deleting) setConfirmOpen(open);
+          }}
+        >
           <AlertDialogTrigger asChild>
             <Button
               variant="ghost"
               size="icon-sm"
-              className="text-muted-foreground hover:text-destructive absolute top-2 right-2 opacity-0 transition-opacity group-hover:opacity-100"
+              className="text-muted-foreground hover:text-destructive absolute top-2 right-2 transition-opacity sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100"
+              aria-label={`删除 Agent ${agent.name}`}
+              disabled={deleting}
             >
               <Trash2Icon className="size-3.5" />
             </Button>
@@ -111,8 +126,16 @@ function AgentGridCard({
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>取消</AlertDialogCancel>
-              <AlertDialogAction onClick={del}>删除</AlertDialogAction>
+              <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={deleting}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void del();
+                }}
+              >
+                {deleting ? "删除中…" : "删除"}
+              </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
@@ -208,10 +231,22 @@ function CreateAgentDialog({ onCreated }: { onCreated: (key: string) => void }) 
 
 export default function AgentsPage() {
   const [agents, setAgents] = React.useState<Agent[]>([]);
+  const [agentsError, setAgentsError] = React.useState("");
+  const [agentsLoading, setAgentsLoading] = React.useState(true);
   const [editKey, setEditKey] = React.useState<string | null>(null);
 
   const reload = React.useCallback(() => {
-    api.agents().then(setAgents).catch(() => setAgents([]));
+    setAgentsLoading(true);
+    setAgentsError("");
+    api.agents()
+      .then((rows) => {
+        setAgents(rows);
+        setAgentsError("");
+      })
+      .catch((error) => {
+        setAgentsError((error as Error).message || "Agent 列表读取失败");
+      })
+      .finally(() => setAgentsLoading(false));
   }, []);
   React.useEffect(() => {
     reload();
@@ -242,7 +277,17 @@ export default function AgentsPage() {
           <CardDescription>共 {agents.length} 个</CardDescription>
         </CardHeader>
         <CardContent>
-          {agents.length === 0 ? (
+          {agentsLoading ? (
+            <p className="text-muted-foreground py-6 text-center text-sm">Agent 列表加载中…</p>
+          ) : agentsError ? (
+            <div className="flex flex-col items-center gap-3 py-6 text-center">
+              <AlertCircleIcon className="size-6 text-destructive" />
+              <p className="text-destructive text-sm">Agent 列表读取失败：{agentsError}</p>
+              <Button size="sm" variant="outline" onClick={reload}>
+                <RefreshCwIcon /> 重试
+              </Button>
+            </div>
+          ) : agents.length === 0 ? (
             <p className="text-muted-foreground py-6 text-center text-sm">（暂无 Agent）</p>
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -266,7 +311,7 @@ export default function AgentsPage() {
                   {editing.name}
                   <span className="text-muted-foreground font-mono text-xs">{editing.key}</span>
                   {!editing.builtin && (
-                    <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                    <Badge variant="outline" className="px-1.5 py-0 text-xs">
                       自定义
                     </Badge>
                   )}

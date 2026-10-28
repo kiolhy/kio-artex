@@ -43,13 +43,27 @@ type Server struct {
 	engine *Engine
 	ctx    context.Context
 
+	// runCancel stops every background worker and task runtime owned by this
+	// server. Tests and graceful process shutdown call Shutdown so databases and
+	// temporary directories are not closed while workers are still using them.
+	runCancel context.CancelFunc
+	bgMu      sync.Mutex
+	bgWG      sync.WaitGroup
+	stopping  bool
+
 	skillDir string // root directory for skill subdirectories
 	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
+	dataDir  string // runtime data root; personal asset files live below it
 
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
 	// scheduler tick and an HTTP settings change / task creation can't both count
 	// free slots off the same snapshot and over-promote past the limit.
 	concMu sync.Mutex
+	// workMu serializes personal-task launch/cancel/delete transitions. The
+	// scheduler can claim a pending task just before a delete request arrives;
+	// re-reading the task under this lock prevents deleting its row while an
+	// in-process launcher is still creating the linked ARTEX task.
+	workMu sync.Mutex
 
 	cfgMu     sync.Mutex
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
@@ -145,7 +159,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
+	runCtx, runCancel := context.WithCancel(ctx)
+	s := &Server{m: m, engine: NewEngine(m), ctx: runCtx, runCancel: runCancel, skillDir: skillDir, dataDir: dataDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
@@ -225,15 +240,29 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
-		go s.evidenceStore().RunGC(s.ctx)
-		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
-		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+		s.goBackground(func() { s.evidenceStore().RunGC(s.ctx) })
+		s.seedPythonInterpreter()                             // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
+		s.goBackground(func() { newScheduler(s).Run(s.ctx) }) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+		s.goBackground(func() {
+			if n, err := m.pg.RedactStoredActivitySecrets(s.ctx); err != nil {
+				log.Printf("[activity] 历史活动秘密清理失败: %v", err)
+			} else if n > 0 {
+				log.Printf("[activity] 已脱敏 %d 条历史活动记录", n)
+			}
+		})
 		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
 		// 与触发器的业务节奏不同，且两者失败互不牵连——推送卡住不该影响 agent 触发。
-		go newNotifier(s).Run(s.ctx)
+		s.goBackground(func() { newNotifier(s).Run(s.ctx) })
+		s.goBackground(func() { (&workReminderWorker{pg: m.pg}).Run(s.ctx) })
+		s.goBackground(func() { (&workAutomationWorker{server: s}).Run(s.ctx) })
+		fcmClient, fcmErr := loadFCMClient()
+		if fcmErr != nil {
+			log.Printf("[push] FCM 配置无效: %v", fcmErr)
+		}
+		s.goBackground(func() { (&pushWorker{server: s, client: fcmClient}).Run(s.ctx) })
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
-		go s.discoverEmptyMCPsOnStartup()
+		s.goBackground(s.discoverEmptyMCPsOnStartup)
 		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
 	}
 	// precedence: persisted DB config > env.
@@ -253,10 +282,66 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
 	s.restoreTaskRuntimes()
-	go s.reconcileConcurrency()
+	s.goBackground(s.reconcileConcurrency)
 	s.startTaskArchiveWorker()
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
 	return s
+}
+
+// goBackground starts server-owned work and records it for Shutdown. Add and
+// Wait are serialized so a worker can never be added after shutdown has begun.
+func (s *Server) goBackground(fn func()) bool {
+	if s == nil || fn == nil {
+		return false
+	}
+	s.bgMu.Lock()
+	if s.stopping || s.ctx.Err() != nil {
+		s.bgMu.Unlock()
+		return false
+	}
+	s.bgWG.Add(1)
+	s.bgMu.Unlock()
+	go func() {
+		defer s.bgWG.Done()
+		fn()
+	}()
+	return true
+}
+
+// Shutdown stops accepting new background work, cancels running agents and
+// workers, and waits for their final database/file writes before Manager.Close.
+// It is safe to call more than once.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.bgMu.Lock()
+	if !s.stopping {
+		s.stopping = true
+		if s.runCancel != nil {
+			s.runCancel()
+		}
+	}
+	s.bgMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		s.bgWG.Wait()
+		s.archiveWG.Wait()
+		if s.side != nil {
+			<-s.side.done
+		}
+		if err := s.engine.Shutdown(ctx); err != nil {
+			log.Printf("[shutdown] engine: %v", err)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Restored deadline and worker loops must inherit the same context as new tasks,
@@ -662,14 +747,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
-
-	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
-	// /api/health），所以这几个改动程序自身的接口天然需要登录。
 	mux.HandleFunc("GET /api/update/check", s.updateCheck)
 	mux.HandleFunc("POST /api/update/apply", s.updateApply)
 	mux.HandleFunc("POST /api/update/rollback", s.updateRollback)
 	mux.HandleFunc("GET /api/update/stream", s.updateStream)
 
+	// 多 Agent 任务（goals → planner → worker 执行链路）
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("GET /api/task-categories", s.pgListTaskCategories)
@@ -677,19 +760,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/task-categories/{id}", s.pgRenameTaskCategory)
 	mux.HandleFunc("DELETE /api/task-categories/{id}", s.pgDeleteTaskCategory)
 	mux.HandleFunc("POST /api/tasks/category/batch", s.updateTasksCategoryBatch)
-	mux.HandleFunc("GET /api/task-templates", s.pgListTaskTemplates)
-	mux.HandleFunc("POST /api/task-templates", s.pgCreateTaskTemplate)
-	mux.HandleFunc("PATCH /api/task-templates/{id}", s.pgUpdateTaskTemplate)
-	mux.HandleFunc("DELETE /api/task-templates/{id}", s.pgDeleteTaskTemplate)
 	mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
 	mux.HandleFunc("PATCH /api/tasks/{id}", s.updateTaskMetadata)
 	mux.HandleFunc("PATCH /api/tasks/{id}/category", s.updateTaskCategory)
-	// 任务级资产拦截/允许规则
-	mux.HandleFunc("GET /api/tasks/{id}/intercept-rules", s.taskInterceptListRules)
-	mux.HandleFunc("POST /api/tasks/{id}/intercept-rules", s.taskInterceptCreateRule)
-	mux.HandleFunc("PUT /api/tasks/{id}/intercept-rules/{rid}", s.taskInterceptUpdateRule)
-	mux.HandleFunc("DELETE /api/tasks/{id}/intercept-rules/{rid}", s.taskInterceptDeleteRule)
-	mux.HandleFunc("POST /api/tasks/{id}/intercept-rules/{rid}/toggle", s.taskInterceptToggleRule)
 	mux.HandleFunc("POST /api/tasks/control/batch", s.controlTasksBatch)
 	mux.HandleFunc("GET /api/task-archives", s.listTaskArchives)
 	mux.HandleFunc("GET /api/task-archives/{id}", s.getTaskArchive)
@@ -699,14 +772,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/task-archives/restore/batch", s.restoreTaskArchivesBatch)
 	mux.HandleFunc("DELETE /api/task-archives/{id}", s.queueTaskArchiveDelete)
 	mux.HandleFunc("POST /api/task-archives/delete/batch", s.deleteTaskArchivesBatch)
-	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
-	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
-	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
-	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)
-	mux.HandleFunc("DELETE /api/tasks/{id}/assets/{assetID}", s.detachTaskAsset)
-	mux.HandleFunc("GET /api/tasks/{id}/intent-assets", s.taskIntentAssets)
 
-	// 工作空间文件管理器（针对 workDir）
+	// 工作空间文件管理器
 	mux.HandleFunc("GET /api/workspace/list", s.wsList)
 	mux.HandleFunc("GET /api/workspace/read", s.wsRead)
 	mux.HandleFunc("POST /api/workspace/write", s.wsWrite)
@@ -714,59 +781,27 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/workspace/delete", s.wsDelete)
 	mux.HandleFunc("GET /api/workspace/download", s.wsDownload)
 	mux.HandleFunc("POST /api/workspace/upload", s.wsUpload)
-	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
-	mux.HandleFunc("POST /api/tasks/{id}/scope", s.taskScopeAdd)
-	mux.HandleFunc("DELETE /api/tasks/{id}/scope/{sid}", s.taskScopeDelete)
-	mux.HandleFunc("GET /api/tasks/{id}/goals", s.listGoals)                       // 目标管理:列出本任务全部目标
-	mux.HandleFunc("POST /api/tasks/{id}/goals", s.addGoal)                        // 目标管理:人工新增目标(复活任务)
-	mux.HandleFunc("PATCH /api/tasks/{id}/goals/{gid}", s.editGoal)                // 目标管理:修改目标(复活任务)
-	mux.HandleFunc("DELETE /api/tasks/{id}/goals/{gid}", s.deleteGoal)             // 目标管理:硬删除目标(不复活)
-	mux.HandleFunc("GET /api/tasks/{id}/constraints", s.listConstraints)           // 约束管理:列出本任务操作约束
-	mux.HandleFunc("POST /api/tasks/{id}/constraints", s.addConstraint)            // 约束管理:新增约束(不通知 planner)
-	mux.HandleFunc("PATCH /api/tasks/{id}/constraints/{cid}", s.editConstraint)    // 约束管理:修改约束
-	mux.HandleFunc("DELETE /api/tasks/{id}/constraints/{cid}", s.deleteConstraint) // 约束管理:删除约束
+
+	// 目标 / 约束 / 控制 / 意图（多 Agent 编排）
+	mux.HandleFunc("GET /api/tasks/{id}/goals", s.listGoals)
+	mux.HandleFunc("POST /api/tasks/{id}/goals", s.addGoal)
+	mux.HandleFunc("PATCH /api/tasks/{id}/goals/{gid}", s.editGoal)
+	mux.HandleFunc("DELETE /api/tasks/{id}/goals/{gid}", s.deleteGoal)
+	mux.HandleFunc("GET /api/tasks/{id}/constraints", s.listConstraints)
+	mux.HandleFunc("POST /api/tasks/{id}/constraints", s.addConstraint)
+	mux.HandleFunc("PATCH /api/tasks/{id}/constraints/{cid}", s.editConstraint)
+	mux.HandleFunc("DELETE /api/tasks/{id}/constraints/{cid}", s.deleteConstraint)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("PUT /api/tasks/{id}/llm", s.updateTaskLLMProfiles)
 	mux.HandleFunc("GET /api/tasks/{id}/llm/resolution", s.taskLLMResolutionHandler)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/control", s.controlIntent)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/messages", s.sendWorkerMessage)
-	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/rerun", s.rerunIntent)    // 重跑单条 blocked/exhausted/stopped 意图
-	mux.HandleFunc("POST /api/tasks/{id}/intents/rerun-blocked", s.rerunBlocked) // 批量重跑本任务全部 blocked 意图
+	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/rerun", s.rerunIntent)
+	mux.HandleFunc("POST /api/tasks/{id}/intents/rerun-blocked", s.rerunBlocked)
 	mux.HandleFunc("POST /api/active", s.setActive)
 
-	mux.HandleFunc("GET /api/llm", s.getLLM)
-	mux.HandleFunc("POST /api/llm", s.setLLM)
-	mux.HandleFunc("POST /api/llm/test", s.testLLM)
-
-	// asset system
-	mux.HandleFunc("GET /api/assets", s.listAssets)
-	mux.HandleFunc("GET /api/assets/counts", s.assetCounts)
-	mux.HandleFunc("POST /api/assets", s.insertAssets)
-	mux.HandleFunc("DELETE /api/assets", s.deleteAssets)
-
-	// company system
-	mux.HandleFunc("GET /api/companies", s.listCompanies)
-	mux.HandleFunc("POST /api/companies", s.createCompany)
-	mux.HandleFunc("GET /api/companies/{id}", s.getCompany)
-	mux.HandleFunc("DELETE /api/companies/{id}", s.deleteCompany)
-	mux.HandleFunc("POST /api/companies/{id}/scope", s.addCompanyScope)
-	mux.HandleFunc("POST /api/companies/reattribute", s.reattribute)
-
+	// 探索 / 活动流 / token 用量
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
-	mux.HandleFunc("GET /api/exploration/findings", s.findings)
-	mux.HandleFunc("GET /api/exploration/findings/groups", s.findingGroups)
-	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
-	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
-	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
-	s.registerFindingTraffic(mux)
-	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
-	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
-	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
-	mux.HandleFunc("GET /api/exploration/findings/{id}/retests", s.listFindingRetests)
-	mux.HandleFunc("GET /api/exploration/findings/retests/active", s.listActiveFindingRetests)
-	mux.HandleFunc("POST /api/exploration/findings/{id}/retests", s.startFindingRetest)
-	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
-	mux.HandleFunc("DELETE /api/exploration/findings/{id}", s.deleteFinding)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/nodes", s.explorationNodes)
@@ -779,48 +814,27 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/tokens", s.tokenStats)
 	mux.HandleFunc("GET /api/tokens/daily", s.tokenDailyStats)
 	mux.HandleFunc("GET /api/tokens/conversations", s.conversationTokens)
-	mux.HandleFunc("GET /api/tokens/usage", s.pgUsageStats) // 全局 llm_usage 聚合（仪表盘新版视图）
+	mux.HandleFunc("GET /api/tokens/usage", s.pgUsageStats)
 
-	mux.HandleFunc("GET /api/audit", s.getAudit)
-	mux.HandleFunc("POST /api/gc", s.gc)
-	mux.HandleFunc("GET /api/traffic", s.getTraffic)
-	mux.HandleFunc("GET /api/traffic/hosts", s.getTrafficHosts)
-	mux.HandleFunc("DELETE /api/traffic", s.deleteTraffic)
-	mux.HandleFunc("DELETE /api/traffic/hosts", s.deleteTrafficHosts)
-	mux.HandleFunc("DELETE /api/traffic/all", s.deleteAllTraffic)
-	mux.HandleFunc("GET /api/traffic/exchange", s.getTrafficExchange)
-	mux.HandleFunc("GET /api/traffic/blob", s.getTrafficBlob)
+	// 工具调用统计 / LLM 录制 / 设置
 	mux.HandleFunc("GET /api/commands", s.pgListCommands)
-	mux.HandleFunc("GET /api/commands/stats", s.pgToolStats) // 按工具聚合调用次数
+	mux.HandleFunc("GET /api/commands/stats", s.pgToolStats)
 	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)
 	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
-	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel) // 按模型聚合本任务 token 用量
+	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel)
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
-	// 漏洞 IM 推送。渠道是「多实例 + 各自过滤规则」的资源，因此独立成一组
-	// REST 接口，而不是塞进扁平的 /api/settings 键值里。
-	mux.HandleFunc("GET /api/notify/meta", s.notifyMeta)
-	mux.HandleFunc("GET /api/notify/channels", s.notifyListChannels)
-	mux.HandleFunc("POST /api/notify/channels", s.notifyCreateChannel)
-	mux.HandleFunc("PATCH /api/notify/channels/{id}", s.notifyUpdateChannel)
-	mux.HandleFunc("DELETE /api/notify/channels/{id}", s.notifyDeleteChannel)
-	mux.HandleFunc("POST /api/notify/channels/{id}/test", s.notifyTestChannel)
-	mux.HandleFunc("GET /api/notify/deliveries", s.notifyListDeliveries)
-	mux.HandleFunc("POST /api/notify/deliveries/{id}/retry", s.notifyRetryDelivery)
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
-	mux.HandleFunc("GET /api/report", s.getReport)
+
+	// 对话 / 聊天 / 会话
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
-	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
+	mux.HandleFunc("POST /api/chat/upload", s.chatUpload)
 	mux.HandleFunc("GET /api/tasks/{id}/chat/status", s.taskChatStatus)
 	mux.HandleFunc("POST /api/tasks/{id}/chat/stop", s.stopChat)
-
-	// --- 管理后台 API (PostgreSQL 数据源; 新版数据库与管理后台方案) ---
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.pgDeleteTask)
-	// Agents
-	// conversations (chat page)
 	mux.HandleFunc("GET /api/conversations", s.pgListConversations)
 	mux.HandleFunc("POST /api/conversations", s.pgCreateConversation)
 	mux.HandleFunc("POST /api/conversations/delete/batch", s.pgDeleteConversationsBatch)
@@ -832,6 +846,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/conversations/{id}/stop", s.pgStopConversation)
 	mux.HandleFunc("GET /api/conversations/{id}/messages/{seq}", s.pgConversationMsgDetail)
 
+	// Agents
 	mux.HandleFunc("GET /api/agents", s.pgListAgents)
 	mux.HandleFunc("POST /api/agents", s.pgCreateAgent)
 	mux.HandleFunc("GET /api/agents/{key}", s.pgGetAgent)
@@ -853,7 +868,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/agents/{key}/prompt/preview", s.pgPreviewPrompt)
 	mux.HandleFunc("GET /api/agents/{key}/visibility", s.pgGetAgentVisibility)
 	mux.HandleFunc("PUT /api/agents/{key}/visibility", s.pgSetAgentVisibility)
-	// 内置工具目录（描述/参数默认值可改、按 agent 绑定；key 与 handler 在代码层）
+
+	// 内置 / 自定义工具
 	mux.HandleFunc("GET /api/tools", s.pgListTools)
 	mux.HandleFunc("PUT /api/tools/{key}", s.pgUpdateTool)
 	mux.HandleFunc("POST /api/tools/custom", s.pgCreateCustomTool)
@@ -862,38 +878,32 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/tools/custom/{key}", s.pgDeleteCustomTool)
 	mux.HandleFunc("POST /api/settings/python/detect", s.pgDetectPython)
 	mux.HandleFunc("POST /api/tools/{key}/reset", s.pgResetTool)
-	// MCP CRUD
+
+	// MCP
 	mux.HandleFunc("GET /api/mcp", s.pgListMCP)
 	mux.HandleFunc("POST /api/mcp", s.pgSaveMCP)
 	mux.HandleFunc("DELETE /api/mcp/{id}", s.pgDeleteMCP)
 	mux.HandleFunc("GET /api/mcp/{id}/tools", s.pgMCPTools)
 	mux.HandleFunc("POST /api/mcp/{id}/refresh", s.pgRefreshMCP)
-	// 资产同步 — ScopeSentry 数据源
-	mux.HandleFunc("GET /api/sync/scopesentry/status", s.syncSSStatus)
-	mux.HandleFunc("POST /api/sync/scopesentry/datasource", s.syncSSDatasource)
-	mux.HandleFunc("GET /api/sync/scopesentry/projects", s.syncSSProjects)
-	mux.HandleFunc("GET /api/sync/scopesentry/tasks", s.syncSSTasks)
-	mux.HandleFunc("POST /api/sync/scopesentry/sync", s.syncSSRun)
-	// Skill CRUD (文件系统)
+
+	// Skill
 	mux.HandleFunc("GET /api/skills", s.fsListSkills)
 	mux.HandleFunc("POST /api/skills", s.fsCreateSkill)
 	mux.HandleFunc("POST /api/skills/upload", s.fsUploadSkill)
 	mux.HandleFunc("DELETE /api/skills/{name}", s.fsDeleteSkill)
-	mux.HandleFunc("GET /api/skills/missing", s.fsMissingSkills)   // 未命中(想调但不存在)的 skill 名
-	mux.HandleFunc("GET /api/skills/{name}/usage", s.fsSkillUsage) // 单个 skill 的最近调用
+	mux.HandleFunc("GET /api/skills/missing", s.fsMissingSkills)
+	mux.HandleFunc("GET /api/skills/{name}/usage", s.fsSkillUsage)
 	mux.HandleFunc("PUT /api/skills/{name}/meta", s.fsUpdateSkillMeta)
 	mux.HandleFunc("POST /api/skills/{name}/dirs", s.fsCreateDir)
 	mux.HandleFunc("GET /api/skills/{name}/files", s.fsListFiles)
-	// {file...} captures path segments including slashes (e.g. scripts/extract.py)
 	mux.HandleFunc("GET /api/skills/{name}/files/{file...}", s.fsReadFile)
 	mux.HandleFunc("PUT /api/skills/{name}/files/{file...}", s.fsWriteFile)
 	mux.HandleFunc("DELETE /api/skills/{name}/files/{file...}", s.fsDeletePath)
-	// MCP 资源侧可见性（更具体的 skill 路由会优先匹配）
 	mux.HandleFunc("GET /api/visibility/{kind}/{id}", s.pgResourceVisibility)
 	mux.HandleFunc("POST /api/visibility/toggle", s.pgToggleVisibility)
-	// Skill 可见性（按名称，更具体，优先于上面的通配路由）
 	mux.HandleFunc("GET /api/visibility/skill/{name}", s.pgSkillVisibility)
 	mux.HandleFunc("POST /api/visibility/skill/toggle", s.pgToggleSkillVisibility)
+
 	// LLM 多 profile
 	mux.HandleFunc("GET /api/llm/profiles", s.pgListProfiles)
 	mux.HandleFunc("POST /api/llm/profiles", s.pgSaveProfile)
@@ -905,20 +915,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/pool/reset", s.pgLLMPoolReset)
 	mux.HandleFunc("POST /api/llm/models", s.pgListModels)
 
-	// 拦截规则管理
+	// 拦截审批（工具调用审批，非安全专属）
 	mux.HandleFunc("GET /api/intercept/rules", s.interceptListRules)
 	mux.HandleFunc("POST /api/intercept/rules", s.interceptCreateRule)
 	mux.HandleFunc("PUT /api/intercept/rules/{id}", s.interceptUpdateRule)
 	mux.HandleFunc("DELETE /api/intercept/rules/{id}", s.interceptDeleteRule)
 	mux.HandleFunc("POST /api/intercept/rules/{id}/toggle", s.interceptToggleRule)
-
-	// 资产拦截规则管理（全局黑名单：域名/IP/URL/CIDR）
-	mux.HandleFunc("GET /api/asset-intercept/rules", s.assetInterceptListRules)
-	mux.HandleFunc("POST /api/asset-intercept/rules", s.assetInterceptCreateRule)
-	mux.HandleFunc("PUT /api/asset-intercept/rules/{id}", s.assetInterceptUpdateRule)
-	mux.HandleFunc("DELETE /api/asset-intercept/rules/{id}", s.assetInterceptDeleteRule)
-	mux.HandleFunc("POST /api/asset-intercept/rules/{id}/toggle", s.assetInterceptToggleRule)
-
 	mux.HandleFunc("GET /api/intercept/pending", s.interceptListPending)
 	mux.HandleFunc("GET /api/intercept/pending/{id}", s.interceptGetOne)
 	mux.HandleFunc("POST /api/intercept/pending/{id}/decide", s.interceptDecide)
@@ -930,7 +932,85 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/intercept/tool-config", s.interceptSetToolConfig)
 	mux.HandleFunc("GET /api/intercept/judge", s.interceptGetJudgeConfig)
 	mux.HandleFunc("PUT /api/intercept/judge", s.interceptSetJudgeConfig)
-	mux.HandleFunc("GET /api/intercept/judge/usage", s.interceptJudgeUsage) // 兜底审批累计 token 用量
+	mux.HandleFunc("GET /api/intercept/judge/usage", s.interceptJudgeUsage)
+
+	// LLM 配置（个人任务自动化执行依赖多 Agent 模型）
+	mux.HandleFunc("GET /api/llm", s.getLLM)
+	mux.HandleFunc("POST /api/llm", s.setLLM)
+	mux.HandleFunc("POST /api/llm/test", s.testLLM)
+
+	// 通知渠道（个人提醒可选用外部渠道）
+	mux.HandleFunc("GET /api/notify/meta", s.notifyMeta)
+	mux.HandleFunc("GET /api/notify/channels", s.notifyListChannels)
+	mux.HandleFunc("POST /api/notify/channels", s.notifyCreateChannel)
+	mux.HandleFunc("PATCH /api/notify/channels/{id}", s.notifyUpdateChannel)
+	mux.HandleFunc("DELETE /api/notify/channels/{id}", s.notifyDeleteChannel)
+	mux.HandleFunc("POST /api/notify/channels/{id}/test", s.notifyTestChannel)
+	mux.HandleFunc("GET /api/notify/deliveries", s.notifyListDeliveries)
+	mux.HandleFunc("POST /api/notify/deliveries/{id}/retry", s.notifyRetryDelivery)
+
+	// 个人工作台（单账号，服务端强制 owner_key='ARTEX'）
+	mux.HandleFunc("GET /api/work/projects", s.workListProjects)
+	mux.HandleFunc("POST /api/work/projects", s.workCreateProject)
+	mux.HandleFunc("PATCH /api/work/projects/{id}", s.workUpdateProject)
+	mux.HandleFunc("DELETE /api/work/projects/{id}", s.workDeleteProject)
+	mux.HandleFunc("GET /api/work/tags", s.workListTags)
+	mux.HandleFunc("POST /api/work/tags", s.workCreateTag)
+	mux.HandleFunc("PATCH /api/work/tags/{id}", s.workUpdateTag)
+	mux.HandleFunc("DELETE /api/work/tags/{id}", s.workDeleteTag)
+	mux.HandleFunc("GET /api/work/tasks", s.workListTasks)
+	mux.HandleFunc("POST /api/work/tasks", s.workCreateTask)
+	mux.HandleFunc("GET /api/work/assets", s.workListAssets)
+	mux.HandleFunc("GET /api/work/assets/stats", s.workAssetStats)
+	mux.HandleFunc("POST /api/work/assets", s.workCreateAsset)
+	mux.HandleFunc("POST /api/work/assets/upload", s.workUploadAssets)
+	mux.HandleFunc("GET /api/work/assets/{id}", s.workGetAsset)
+	mux.HandleFunc("PATCH /api/work/assets/{id}", s.workUpdateAsset)
+	mux.HandleFunc("DELETE /api/work/assets/{id}", s.workTrashAsset)
+	mux.HandleFunc("POST /api/work/assets/{id}/restore", s.workRestoreAsset)
+	mux.HandleFunc("DELETE /api/work/assets/{id}/purge", s.workPurgeAsset)
+	mux.HandleFunc("GET /api/work/assets/{id}/versions", s.workAssetVersions)
+	mux.HandleFunc("POST /api/work/assets/{id}/versions", s.workUploadAssetVersion)
+	mux.HandleFunc("POST /api/work/assets/{id}/reparse", s.workReparseAsset)
+	mux.HandleFunc("GET /api/work/assets/{id}/content", s.workAssetContent)
+	mux.HandleFunc("GET /api/work/assets/{id}/chunks", s.workAssetChunks)
+	mux.HandleFunc("GET /api/work/assets/{id}/secret-refs", s.workListAssetSecretRefs)
+	mux.HandleFunc("PUT /api/work/assets/{id}/secret-refs", s.workReplaceAssetSecretRefs)
+	mux.HandleFunc("POST /api/work/assets/{id}/test-api", s.workAssetTestAPI)
+	// Register each view explicitly. A catch-all "{view}" pattern conflicts with
+	// "/tasks/{id}/reminders" in Go's ServeMux pattern precedence.
+	mux.HandleFunc("GET /api/work/tasks/views/inbox", s.workListTasks)
+	mux.HandleFunc("GET /api/work/tasks/views/today", s.workListTasks)
+	mux.HandleFunc("GET /api/work/tasks/views/upcoming", s.workListTasks)
+	mux.HandleFunc("GET /api/work/tasks/views/overdue", s.workListTasks)
+	mux.HandleFunc("GET /api/work/tasks/{id}", s.workGetTask)
+	mux.HandleFunc("PATCH /api/work/tasks/{id}", s.workUpdateTask)
+	mux.HandleFunc("DELETE /api/work/tasks/{id}", s.workDeleteTask)
+	mux.HandleFunc("POST /api/work/tasks/{id}/complete", s.workCompleteTask)
+	mux.HandleFunc("POST /api/work/tasks/{id}/run", s.workRunTask)
+	mux.HandleFunc("POST /api/work/tasks/{id}/automation/cancel", s.workCancelAutomation)
+	mux.HandleFunc("GET /api/work/tasks/{id}/assets", s.workTaskAssets)
+	mux.HandleFunc("PUT /api/work/tasks/{id}/assets", s.workReplaceTaskAssets)
+	mux.HandleFunc("POST /api/work/tasks/{id}/assets/recommend", s.workRecommendTaskAssets)
+	mux.HandleFunc("GET /api/work/tasks/{id}/asset-runs", s.workTaskAssetRuns)
+	mux.HandleFunc("GET /api/work/calendar/events", s.workCalendarEvents)
+	mux.HandleFunc("GET /api/work/tasks/{id}/reminders", s.workListReminders)
+	mux.HandleFunc("PUT /api/work/tasks/{id}/reminders", s.workReplaceReminders)
+	mux.HandleFunc("PUT /api/work/tasks/{id}/reminder-channels", s.workReplaceReminderChannels)
+	mux.HandleFunc("GET /api/work/reminders/feed", s.workReminderFeed)
+	mux.HandleFunc("GET /api/work/settings", s.workGetSettings)
+	mux.HandleFunc("PATCH /api/work/settings", s.workSaveSettings)
+	mux.HandleFunc("GET /api/work/notes", s.workListNotes)
+	mux.HandleFunc("POST /api/work/notes", s.workCreateNote)
+	mux.HandleFunc("GET /api/work/notes/{id}", s.workGetNote)
+	mux.HandleFunc("PATCH /api/work/notes/{id}", s.workUpdateNote)
+	mux.HandleFunc("DELETE /api/work/notes/{id}", s.workDeleteNote)
+	mux.HandleFunc("GET /api/work/dashboard/layout", s.workGetLayout)
+	mux.HandleFunc("PUT /api/work/dashboard/layout", s.workSaveLayout)
+	mux.HandleFunc("GET /api/work/automation/overview", s.workAutomationOverview)
+	mux.HandleFunc("POST /api/push/register", s.pushRegister)
+	mux.HandleFunc("DELETE /api/push/register", s.pushUnregister)
+	mux.HandleFunc("GET /api/push/devices", s.pushDevices)
 
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
 	// frontend (public — auth is enforced client-side and on the API). With the
@@ -2671,7 +2751,7 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor})
 }
 
-// parseActivitySession maps a stable session key (main | plan | intent:<ID>) to a
+// parseActivitySession maps a stable session key (main | plan | intent:<ID> | all) to a
 // DB session filter. Goal Agent + Planner both live under worker="planner" (the
 // single Plan session); a Worker session is one intent, keyed by its node id.
 func parseActivitySession(sess string) (db.ActivitySessionFilter, bool) {
@@ -2679,6 +2759,10 @@ func parseActivitySession(sess string) (db.ActivitySessionFilter, bool) {
 	case sess == "" || sess == "main":
 		// bare "main" = the current segment; caller resolves MainSeg via the store.
 		return db.ActivitySessionFilter{Main: true}, true
+	case sess == "all":
+		// Whole-task timeline used by the personal workbench execution view. The
+		// zero filter intentionally spans main, planner and every worker session.
+		return db.ActivitySessionFilter{}, true
 	case strings.HasPrefix(sess, "main:"):
 		seg, err := strconv.Atoi(strings.TrimPrefix(sess, "main:"))
 		if err != nil || seg < 0 {
@@ -3748,6 +3832,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			// taskDir = agent 的工作目录(CWD),与 chatUpload 落盘、ensureRunDir 一致。
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
+			ctx = agent.WithRunInfo(ctx, agent.RunInfo{TaskID: maTaskID, RunKind: t.RunKind})
 			s.engine.BeginLLMCall(t.ID)
 			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
 			s.engine.EndLLMCall(t.ID)

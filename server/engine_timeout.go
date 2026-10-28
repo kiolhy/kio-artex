@@ -256,8 +256,9 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 	e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
 		Summary: fmt.Sprintf("任务超时收尾·终局判定(第 %d 轮)", e.nextPlannerRound(t.ID))})
 	tTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	fctx = agent.WithRunInfo(fctx, agent.RunInfo{TaskID: tTaskID, RunKind: t.RunKind})
 	e.BeginLLMCall(t.ID)
-	met, reason, err := planner.Plan(fctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
+	met, reason, _, err := planner.Plan(fctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
 	e.EndLLMCall(t.ID)
 	if err != nil {
 		log.Printf("[deadline] task %s 终局规划出错: %v", t.ID, err)

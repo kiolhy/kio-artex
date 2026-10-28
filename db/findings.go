@@ -427,7 +427,7 @@ func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int
 	}
 	var intentID int64
 	if err := tx.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,payload,priority,state,origin)
-		VALUES ($1,'intent',$2,10,'open','human') RETURNING id`, s.expID, raw).Scan(&intentID); err != nil {
+		VALUES ($1,'intent',$2,10,'open','human') RETURNING id`, s.expID, string(raw)).Scan(&intentID); err != nil {
 		return 0, Activity{}, err
 	}
 	if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,asset_id)
@@ -454,7 +454,7 @@ func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int
 INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
 VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14)
 RETURNING id, created_at`, s.expID, audit.NodeID, utf8Clean(audit.Worker), utf8Clean(audit.Kind), utf8Clean(audit.Tool), utf8Clean(audit.ToolUseID), audit.IsError,
-		utf8Clean(audit.Summary), utf8Clean(audit.Detail), metadata, audit.InputTokens, audit.OutputTokens, audit.CacheReadTokens, audit.CacheWriteTokens).
+		utf8Clean(audit.Summary), utf8Clean(audit.Detail), string(metadata), audit.InputTokens, audit.OutputTokens, audit.CacheReadTokens, audit.CacheWriteTokens).
 		Scan(&audit.ID, &audit.CreatedAt); err != nil {
 		return 0, Activity{}, err
 	}

@@ -104,6 +104,28 @@ import type {
   UsageStats,
   WorkspaceFile,
   WorkspaceListing,
+  WorkAutomationOverview,
+  WorkAsset,
+  WorkAssetChunk,
+  WorkAssetDetail,
+  WorkAssetInput,
+  WorkAssetStats,
+  WorkAssetType,
+  WorkAssetVersion,
+  WorkDashboardLayout,
+  WorkNote,
+  WorkNoteInput,
+  WorkProject,
+  WorkSettings,
+  WorkTask,
+  WorkTaskAssetCandidate,
+  WorkTaskAssetRun,
+  WorkTaskAssets,
+  WorkTaskInput,
+  WorkReminder,
+  WorkReminderFeedEvent,
+  WorkCalendarEvent,
+  WorkTag,
 } from "@/lib/types";
 
 function getToken(): string | null {
@@ -111,24 +133,40 @@ function getToken(): string | null {
   return localStorage.getItem("artex_token");
 }
 
+export class HttpError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
 export async function http<T>(path: string, init?: RequestInit): Promise<T> {
   if (MOCK) return mockHandle<T>(init?.method ?? "GET", path, init?.body ?? null);
   const token = getToken();
+  // A 401 from the login/init endpoints means "wrong password" or "already
+  // initialized", not "the current session expired". Redirecting here would
+  // reload the page and hide the form-level error before the user can read it.
+  const isCredentialRequest = path === "/auth/login" || path === "/auth/init";
   const r = await fetch(`/api${path}`, {
     ...init,
     headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(init?.body && !(init.body instanceof FormData)
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers as Record<string, string> | undefined),
     },
   });
-  if (r.status === 401) {
+  if (r.status === 401 && !isCredentialRequest) {
     if (typeof window !== "undefined") {
       localStorage.removeItem("artex_token");
       document.cookie = "artex_token=; path=/; max-age=0";
       window.location.href = "/login";
     }
-    throw new Error("未授权");
+    throw new HttpError("未授权", r.status);
   }
   if (!r.ok) {
     const fallback = `${init?.method ?? "GET"} ${path}: ${r.status}`;
@@ -141,10 +179,29 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Keep the status-based fallback for empty or non-JSON error responses.
     }
-    throw new Error(message);
+    throw new HttpError(message, r.status);
   }
   if (r.status === 204) return undefined as T;
   return r.json();
+}
+
+async function authenticatedBlob(path: string): Promise<Blob> {
+  const token = getToken();
+  const response = await fetch(`/api${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (response.status === 401) {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("artex_token");
+      document.cookie = "artex_token=; path=/; max-age=0";
+      window.location.href = "/login";
+    }
+    throw new HttpError("未授权", 401);
+  }
+  if (!response.ok) {
+    throw new HttpError(`读取资产内容失败：${response.status}`, response.status);
+  }
+  return response.blob();
 }
 
 // sseUrl builds a URL for Server-Sent Events streams.
@@ -1313,4 +1370,158 @@ export const api = {
   // 202 即返回，实际下载在后台跑，进度走 /api/update/stream。
   applyUpdate: () => post<{ ok: boolean; target: string }>(`/update/apply`),
   rollbackUpdate: () => post<{ ok: boolean }>(`/update/rollback`),
+
+  // ---- Personal workspace ----
+  workProjects: () => get<WorkProject[]>("/work/projects"),
+  createWorkProject: (input: { name: string; color?: string; description?: string }) =>
+    post<WorkProject>("/work/projects", input),
+  updateWorkProject: (
+    id: number,
+    input: Partial<{ name: string; color: string; description: string; archived: boolean }>,
+  ) => patch<WorkProject>(`/work/projects/${id}`, input),
+  deleteWorkProject: (id: number) => del<{ ok: boolean }>(`/work/projects/${id}`),
+  workTasks: (
+    params?: Partial<
+      Record<
+        | "view"
+        | "project_id"
+        | "parent_task_id"
+        | "parent_only"
+        | "status"
+        | "priority"
+        | "tag_ids"
+        | "q"
+        | "from"
+        | "to",
+        string
+      >
+    >,
+  ) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params ?? {})) {
+      if (value !== undefined && value !== "") query.set(key, value);
+    }
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return get<WorkTask[]>(`/work/tasks${suffix}`).then(arr);
+  },
+  createWorkTask: (input: WorkTaskInput) => post<WorkTask>("/work/tasks", input),
+  workTask: (id: number) => get<WorkTask>(`/work/tasks/${id}`),
+  updateWorkTask: (id: number, input: WorkTaskInput) => patch<WorkTask>(`/work/tasks/${id}`, input),
+  completeWorkTask: (id: number) => post<WorkTask>(`/work/tasks/${id}/complete`),
+  deleteWorkTask: (id: number) => del<{ ok: boolean }>(`/work/tasks/${id}`),
+  runWorkTask: (id: number) => post<WorkTask>(`/work/tasks/${id}/run`),
+  cancelWorkTaskAutomation: (id: number) => post<WorkTask>(`/work/tasks/${id}/automation/cancel`),
+  workAutomationOverview: () => get<WorkAutomationOverview>("/work/automation/overview"),
+  workCalendarEvents: (from?: string, to?: string) => {
+    const query = new URLSearchParams();
+    if (from) query.set("from", from);
+    if (to) query.set("to", to);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return get<WorkCalendarEvent[]>(`/work/calendar/events${suffix}`).then(arr);
+  },
+  workTags: () => get<WorkTag[]>("/work/tags").then(arr),
+  createWorkTag: (input: { name: string; color?: string }) => post<WorkTag>("/work/tags", input),
+  updateWorkTag: (id: number, input: Partial<{ name: string; color: string }>) =>
+    patch<WorkTag>(`/work/tags/${id}`, input),
+  deleteWorkTag: (id: number) => del<{ ok: boolean }>(`/work/tags/${id}`),
+  workTaskReminders: (id: number) => get<WorkReminder[]>(`/work/tasks/${id}/reminders`).then(arr),
+  replaceWorkTaskReminders: (
+    id: number,
+    reminders: Array<{ kind: "due" | "overdue"; minutes: number; enabled: boolean }>,
+  ) => put<WorkReminder[]>(`/work/tasks/${id}/reminders`, { reminders }),
+  replaceWorkTaskReminderChannels: (id: number, kind: "due" | "overdue", channelIDs: number[]) =>
+    put<WorkReminder[]>(`/work/tasks/${id}/reminder-channels`, { kind, channel_ids: channelIDs }),
+  workReminderFeed: (afterID?: number, limit = 50) => {
+    const query = new URLSearchParams();
+    if (afterID !== undefined) query.set("after_id", String(Math.max(0, afterID)));
+    query.set("limit", String(limit));
+    return get<WorkReminderFeedEvent[]>(`/work/reminders/feed?${query.toString()}`).then(arr);
+  },
+  workNotes: (params?: { q?: string; archived?: boolean; tag_ids?: number[] }) => {
+    const query = new URLSearchParams();
+    if (params?.q) query.set("q", params.q);
+    if (params?.archived) query.set("archived", "1");
+    if (params?.tag_ids?.length) query.set("tag_ids", params.tag_ids.join(","));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return get<WorkNote[]>(`/work/notes${suffix}`).then(arr);
+  },
+  createWorkNote: (input: WorkNoteInput) => post<WorkNote>("/work/notes", input),
+  workNote: (id: number) => get<WorkNote>(`/work/notes/${id}`),
+  updateWorkNote: (id: number, input: WorkNoteInput) => patch<WorkNote>(`/work/notes/${id}`, input),
+  deleteWorkNote: (id: number) => del<{ ok: boolean }>(`/work/notes/${id}`),
+  workSettings: () => get<WorkSettings>("/work/settings"),
+  updateWorkSettings: (input: Partial<Pick<WorkSettings, "default_reminder_minutes" | "default_channel_id">>) =>
+    patch<WorkSettings>("/work/settings", input),
+  workDashboardLayout: () => get<{ layout: WorkDashboardLayout | null }>("/work/dashboard/layout"),
+  saveWorkDashboardLayout: (layout: WorkDashboardLayout) =>
+    put<{ ok: boolean }>("/work/dashboard/layout", { layout }),
+
+  // ---- Personal knowledge assets ----
+  workAssets: (params?: {
+    type?: WorkAssetType | "";
+    status?: string;
+    q?: string;
+    tag_ids?: number[];
+    trash?: boolean;
+    archived?: boolean;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.type) query.set("type", params.type);
+    if (params?.status) query.set("status", params.status);
+    if (params?.q?.trim()) query.set("q", params.q.trim());
+    if (params?.tag_ids?.length) query.set("tag_ids", params.tag_ids.join(","));
+    if (params?.trash) query.set("trash", "1");
+    if (params?.archived) query.set("archived", "1");
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return get<WorkAsset[]>(`/work/assets${suffix}`).then(arr);
+  },
+  workAssetStats: () => get<WorkAssetStats>("/work/assets/stats"),
+  workAsset: (id: number) => get<WorkAssetDetail>(`/work/assets/${id}`),
+  createWorkAsset: (input: WorkAssetInput) => post<WorkAsset>("/work/assets", input),
+  uploadWorkAssets: (
+    files: File[],
+    options?: { title?: string; description?: string; summary?: string; tag_ids?: number[] },
+  ) => {
+    const body = new FormData();
+    for (const file of files) body.append("files", file);
+    if (options?.title) body.append("title", options.title);
+    if (options?.description) body.append("description", options.description);
+    if (options?.summary) body.append("summary", options.summary);
+    if (options?.tag_ids?.length) body.append("tag_ids", options.tag_ids.join(","));
+    return http<WorkAsset[]>("/work/assets/upload", { method: "POST", body });
+  },
+  updateWorkAsset: (id: number, input: Partial<WorkAssetInput>) =>
+    patch<WorkAsset>(`/work/assets/${id}`, input),
+  trashWorkAsset: (id: number) => del<{ ok: boolean }>(`/work/assets/${id}`),
+  restoreWorkAsset: (id: number) => post<WorkAsset>(`/work/assets/${id}/restore`),
+  purgeWorkAsset: (id: number) => del<{ ok: boolean }>(`/work/assets/${id}/purge`),
+  workAssetVersions: (id: number) =>
+    get<WorkAssetVersion[]>(`/work/assets/${id}/versions`).then(arr),
+  uploadWorkAssetVersion: (id: number, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return http<WorkAsset>(`/work/assets/${id}/versions`, { method: "POST", body });
+  },
+  reparseWorkAsset: (id: number) => post<WorkAsset>(`/work/assets/${id}/reparse`),
+  workAssetChunks: (id: number, versionId?: number) => {
+    const suffix = versionId ? `?version_id=${versionId}` : "";
+    return get<WorkAssetChunk[]>(`/work/assets/${id}/chunks${suffix}`).then(arr);
+  },
+  workAssetContentBlob: (id: number) => authenticatedBlob(`/work/assets/${id}/content`),
+  testWorkAssetAPI: (
+    id: number,
+    input: {
+      operation_id: string;
+      path_params?: Record<string, string>;
+      query?: Record<string, string>;
+      body?: unknown;
+    },
+  ) => post<Record<string, unknown>>(`/work/assets/${id}/test-api`, input),
+  workTaskAssets: (id: number) => get<WorkTaskAssets>(`/work/tasks/${id}/assets`),
+  replaceWorkTaskAssets: (id: number, pinned_asset_ids: number[], excluded_asset_ids: number[]) =>
+    put<WorkTaskAssets>(`/work/tasks/${id}/assets`, { pinned_asset_ids, excluded_asset_ids }),
+  recommendWorkTaskAssets: (id: number) =>
+    post<WorkTaskAssetCandidate[]>(`/work/tasks/${id}/assets/recommend`).then(arr),
+  workTaskAssetRuns: (id: number) =>
+    get<WorkTaskAssetRun[]>(`/work/tasks/${id}/asset-runs`).then(arr),
 };

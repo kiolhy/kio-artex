@@ -61,6 +61,10 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		out = ToolResolve(ctx, agentKey, out)
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	out = personalToolFilter(ctx, out)
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		def.FindingGuidance = ""
+	}
 	for i, t := range out {
 		out[i] = guardPanic(t)
 	}

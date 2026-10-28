@@ -189,28 +189,28 @@ func intp(v int) *int { return &v }
 // 注：planner/worker/mainagent/auto 的交互式 shell 默认由下方 interactive_shell_default_v1
 // 块统一置 true（尊重后续 toggle）；这里的 interactiveShell 只给需要「建行即默认开」的新 agent。
 var builtinAgents = []builtinAgent{
-	{"goals", "目标拆解", "goals", "把渗透任务目标拆解成若干独立、可验证的子目标。", []promptVar{
-		{"EngagementDescription", "任务描述（测试对象/背景）", "测试 example.com 站点", "exploration"},
+	{"goals", "目标拆解", "goals", "把个人工作目标拆解成若干独立、可验证的结果目标。", []promptVar{
+		{"EngagementDescription", "任务描述（目标/背景）", "整理本周项目计划并输出行动清单", "exploration"},
 		// Now 是全局 runtime 变量(见 server.globalPromptVars),不再在各 agent 目录里
 		// 重复定义,否则 withGlobalVars 追加时会与全局项撞名。
 	}, false, nil},
-	{"planner", "规划", "planner", "读取态势、判定目标，只在确有未覆盖的新方向时补充探索意图（每任务一个规划循环）。", []promptVar{
-		{"Goal", "任务总目标", "拿下 example.com 的管理员权限", "exploration"},
-		{"AssetSummary", "资产计数/类型分布摘要(可选)", "domain:3 ip:5 site:2", "distilled"},
+	{"planner", "规划", "planner", "读取任务进展，只在确有未覆盖步骤时补充可执行工作项。", []promptVar{
+		{"Goal", "任务总目标", "整理项目资料并输出可执行的周计划", "exploration"},
+		{"AssetSummary", "参考资料摘要(可选)", "文档:3 表格:2 链接:1", "distilled"},
 	}, false, nil},
-	{"mainagent", "主", "main", "人机接口：观察进展，把人的意图落成 hint 或高优先级意图。", []promptVar{
-		{"Goal", "当前任务目标", "拿下 example.com 的管理员权限", "exploration"},
-		{"AssetSummary", "开局态势摘要(可选)", "domain:3 ip:5", "distilled"},
-		{"FindingsSummary", "已确认漏洞摘要(可选)", "high:1 medium:2", "distilled"},
+	{"mainagent", "主 Agent", "main", "个人助理主入口：理解用户目标、查看执行进展并协调多 Agent 交付结果。", []promptVar{
+		{"Goal", "当前任务目标", "整理项目资料并输出可执行的周计划", "exploration"},
+		{"AssetSummary", "参考资料摘要(可选)", "文档:3 表格:2", "distilled"},
+		{"FindingsSummary", "阶段结果摘要(可选)", "已完成:3 待确认:1", "distilled"},
 	}, false, nil},
-	{"worker", "执行", "worker", "领取一条意图执行，把发现的事实/漏洞写回知识图谱后停止。", []promptVar{
+	{"worker", "执行", "worker", "领取一个工作项，使用可用工具完成执行并记录可靠事实和结果。", []promptVar{
 		{"ProxyAddr", "记录代理地址(驱动 if 双文案)", "127.0.0.1:8080", "runtime"},
 		{"WorkerName", "worker 自我标识(可选)", "worker-1", "runtime"},
 	}, false, nil},
-	// Auto:内置「平台操作」agent。不参与渗透编排循环,经对话页驱动,用工具操作平台。
-	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
-	// 渗透测试:内置「独立渗透」agent。经对话页驱动,一人从侦察到收尾走完整条渗透链,自己规划自己执行自己验证。默认开启交互式 shell。
-	{"pentest", "渗透测试", "assistant", "独立渗透 agent：一人从侦察→找攻击面→深入利用→验证→收尾走完整条链，自己规划、自己执行、自己对抗式验证。", nil, true, intp(0)},
+	// Auto: platform-operations assistant used by the chat page.
+	{"auto", "Auto", "assistant", "通用助理：协助管理任务、资料、内容和工作流程，并可配置技能与外部工具。", nil, false, nil},
+	// Retained only for compatibility with existing databases; hidden by the UI.
+	{"pentest", "旧版助理", "assistant", "保留用于历史兼容，不再在个人工作台中展示或提供。", nil, false, intp(0)},
 }
 
 // seedBuiltins inserts the fixed built-in agents and their variable catalog (idempotent).
@@ -220,8 +220,13 @@ func (d *DB) seedBuiltins() error {
 		err := d.QueryRow(`
 INSERT INTO agents(key, name, description, role, builtin, enabled, interactive_shell, run_seconds)
 VALUES ($1, $2, NULLIF($3,''), $4, true, true, $5, COALESCE($6, 1200))
-ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description
+ON CONFLICT (key) DO NOTHING
 RETURNING id`, a.key, a.name, a.desc, a.role, a.interactiveShell, a.runSeconds).Scan(&agentID)
+		if err == sql.ErrNoRows {
+			if err = d.QueryRow(`SELECT id FROM agents WHERE key=$1`, a.key).Scan(&agentID); err != nil {
+				return fmt.Errorf("agent %s lookup: %w", a.key, err)
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("agent %s: %w", a.key, err)
 		}
@@ -251,6 +256,9 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
 			return fmt.Errorf("seed interactive_shell defaults: %w", err)
 		}
 		_ = d.SetSetting("interactive_shell_default_v1", "true")
+	}
+	if err := d.migrateLegacyBuiltinAgentCopy(); err != nil {
+		return fmt.Errorf("migrate builtin agent copy: %w", err)
 	}
 	// Seed the built-in browser (Playwright) MCP once — DISABLED by default (用户
 	// 需要时自行启用), no proxy by default. The traffic-capture toggle injects/strips
@@ -321,9 +329,7 @@ ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
 // default — the user turns them on per-agent when needed. scopesentry additionally
 // declares `mcps: ScopeSentry`, which only takes effect once it's made visible and
 // that MCP is enabled/configured.
-var builtinSkillVisibility = map[string][]string{
-	"api-recon": {"auto", "pentest", "worker"},
-}
+var builtinSkillVisibility = map[string][]string{}
 
 // seedBuiltinSkillVisibility binds the shipped built-in skills to their default
 // agents. Insert-if-absent (ON CONFLICT DO NOTHING) so a user's later toggle-off is
@@ -339,7 +345,49 @@ ON CONFLICT (agent_id, skill_name) DO NOTHING`, key, skillName); err != nil {
 			}
 		}
 	}
+	if v, _, _ := d.GetSetting("personal_builtin_skill_visibility_v1"); v != "done" {
+		if _, err := d.Exec(`
+DELETE FROM agent_skill_visibility v
+USING agents a
+WHERE v.agent_id=a.id AND v.skill_name='api-recon'
+  AND a.key IN ('auto','pentest','worker')`); err != nil {
+			return fmt.Errorf("remove legacy builtin skill visibility: %w", err)
+		}
+		if err := d.SetSetting("personal_builtin_skill_visibility_v1", "done"); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// migrateLegacyBuiltinAgentCopy only upgrades built-in metadata that is still
+// byte-for-byte (or field-for-field) the shipped legacy value. User-edited names
+// and descriptions are left untouched.
+func (d *DB) migrateLegacyBuiltinAgentCopy() error {
+	const flag = "personal_builtin_agent_copy_v1"
+	if v, _, _ := d.GetSetting(flag); v == "done" {
+		return nil
+	}
+	legacy := []struct {
+		key, oldName, oldDesc, name, desc string
+	}{
+		{"goals", "目标拆解", "把渗透任务目标拆解成若干独立、可验证的子目标。", "目标拆解", "把个人工作目标拆解成若干独立、可验证的结果目标。"},
+		{"planner", "规划", "读取态势、判定目标，只在确有未覆盖的新方向时补充探索意图（每任务一个规划循环）。", "规划", "读取任务进展，只在确有未覆盖步骤时补充可执行工作项。"},
+		{"mainagent", "主", "人机接口：观察进展，把人的意图落成 hint 或高优先级意图。", "主 Agent", "个人助理主入口：理解用户目标、查看执行进展并协调多 Agent 交付结果。"},
+		{"worker", "执行", "领取一条意图执行，把发现的事实/漏洞写回知识图谱后停止。", "执行", "领取一个工作项，使用可用工具完成执行并记录可靠事实和结果。"},
+		{"auto", "Auto", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", "Auto", "通用助理：协助管理任务、资料、内容和工作流程，并可配置技能与外部工具。"},
+		{"pentest", "渗透测试", "独立渗透 agent：一人从侦察→找攻击面→深入利用→验证→收尾走完整条链，自己规划、自己执行、自己对抗式验证。", "旧版助理", "保留用于历史兼容，不再在个人工作台中展示或提供。"},
+	}
+	for _, item := range legacy {
+		if _, err := d.Exec(`
+UPDATE agents
+SET name=$3, description=$4
+WHERE key=$1 AND name=$2 AND COALESCE(description,'')=$5`,
+			item.key, item.oldName, item.name, item.desc, item.oldDesc); err != nil {
+			return fmt.Errorf("agent %s: %w", item.key, err)
+		}
+	}
+	return d.SetSetting(flag, "done")
 }
 
 // seedDefaultInterceptRules inserts built-in safety intercept rules once on

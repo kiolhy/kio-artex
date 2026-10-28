@@ -339,8 +339,15 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
 
-func plannerSystem(goal, dataDir, workDir string) string {
-	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+func plannerSystem(ctx context.Context, goal, dataDir, workDir string) string {
+	def := plannerDefaultTmpl
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		def = personalPlannerDefaultTmpl
+	}
+	body := renderSystemForRun(ctx, "planner", def, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		return body + personalArtifactSpec(workDir)
+	}
 	return body + artifactSpec(workDir)
 }
 
@@ -352,7 +359,7 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // and/or finding(s) reported (may be several — the engine debounces a burst; empty
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
-func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, response string, err error) {
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
@@ -373,7 +380,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	ri := RunInfoFrom(ctx)
+	ri.TaskID = taskID
+	ri.ExplorationID = explorationID(ts)
+	ctx = WithRunInfo(ctx, ri)
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
@@ -390,7 +400,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
-	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	sysBody := plannerSystem(ctx, goal, p.workDir, taskDir)
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
@@ -462,12 +472,12 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		renderPlannerTodos(opts.Todos.List())
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
-	_, _, err = captureRun(ctx, opts, input,
+	response, _, err = captureRun(ctx, opts, input,
 		func(r db.Activity) {
 			if emit != nil {
 				r.Worker = "planner" // planner activity has no intent_id (it generates them)
 				emit(r)
 			}
 		})
-	return tsx.GoalMet, tsx.Reason, err
+	return tsx.GoalMet, tsx.Reason, response, err
 }

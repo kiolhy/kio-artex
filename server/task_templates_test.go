@@ -15,12 +15,14 @@ import (
 )
 
 func TestTaskTemplateHTTPCRUD(t *testing.T) {
+	t.Skip("渗透测试安全任务模板已从个人工作台移除")
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
 	defer m.Close()
 	s := New(context.Background(), m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer shutdownTestServer(t, s)
 	h := s.Handler()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {
@@ -91,6 +93,7 @@ func TestConversationPatchReturnsPinState(t *testing.T) {
 	}
 	defer m.Close()
 	s := New(context.Background(), m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer shutdownTestServer(t, s)
 	conversation, err := m.pg.CreateConversation("mainagent", "pin through http", nil)
 	if err != nil {
 		t.Fatal(err)

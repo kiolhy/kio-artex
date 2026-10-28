@@ -4,19 +4,20 @@ import { useEffect, useRef, useState } from "react";
 
 import { useRouter } from "next/navigation";
 
-import { AlertTriangle, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Eye, EyeOff, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { api } from "@/lib/api";
+import { api, HttpError } from "@/lib/api";
 import { auth } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -47,7 +48,7 @@ export default function LoginPage() {
       // localStorage 可能仍有凭据但 cookie 已丢失。先同步，再发起全新请求，
       // 避免服务端守卫或路由缓存把跳转送回仍处于 checking 状态的登录页。
       auth.setToken(token);
-      window.location.replace("/function/tasks");
+      window.location.replace("/dashboard");
       return;
     }
     api
@@ -70,9 +71,17 @@ export default function LoginPage() {
     try {
       const { token } = await api.login("ARTEX", password);
       auth.setToken(token);
-      window.location.replace("/function/tasks");
-    } catch {
-      setError("用户名或密码错误");
+      window.location.replace("/dashboard");
+    } catch (cause) {
+      if (cause instanceof HttpError && (cause.status === 401 || cause.status === 403)) {
+        setError("密码错误，请重新输入");
+      } else if (cause instanceof HttpError && cause.status >= 500) {
+        setError("服务暂时不可用，请稍后重试");
+      } else if (cause instanceof TypeError) {
+        setError("无法连接到服务，请检查网络后重试");
+      } else {
+        setError(cause instanceof Error && cause.message ? cause.message : "登录失败，请稍后重试");
+      }
     } finally {
       setLoading(false);
     }
@@ -87,7 +96,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex h-dvh">
+    <div className="flex min-h-dvh">
       {/* Left panel */}
       <div className="hidden flex-col items-center justify-center bg-primary p-12 text-center lg:flex lg:w-1/3">
         <div className="relative flex items-center justify-center">
@@ -100,11 +109,19 @@ export default function LoginPage() {
       </div>
 
       {/* Right panel */}
-      <div className="flex w-full items-center justify-center bg-background p-8 lg:w-2/3">
-        <div className="w-full max-w-md space-y-10 py-24 lg:py-32">
+      <div className="flex min-h-dvh w-full items-center justify-center bg-background px-5 py-10 lg:w-2/3 lg:p-8">
+        <div className="w-full max-w-md space-y-8 lg:space-y-10 lg:py-24">
           <div className="space-y-4 text-center">
-            <h2 className="text-2xl font-medium tracking-tight">登录</h2>
-            <p className="mx-auto max-w-xl text-muted-foreground">欢迎回来，请输入密码以继续使用 ARTEX</p>
+            <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-primary/10 lg:hidden">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/logo.png" alt="" width={36} height={36} />
+            </div>
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">ARTEX 个人工作台</h1>
+              <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                集中管理待办、项目、日历、笔记，并把复杂事项交给多 Agent 自动执行。
+              </p>
+            </div>
           </div>
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <div className="space-y-1.5">
@@ -113,15 +130,29 @@ export default function LoginPage() {
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="password">密码</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="请输入密码"
-                autoFocus
-                autoComplete="current-password"
-              />
+              <div className="relative">
+                <Input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="请输入密码"
+                  autoFocus
+                  autoComplete="current-password"
+                  className="h-11 pr-12"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="absolute top-1/2 right-1 -translate-y-1/2"
+                  onClick={() => setShowPassword((value) => !value)}
+                  aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                  aria-pressed={showPassword}
+                >
+                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                </Button>
+              </div>
             </div>
             <div className="flex items-start gap-2">
               <Checkbox
@@ -141,10 +172,19 @@ export default function LoginPage() {
                 </button>
               </Label>
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button type="submit" className="w-full" disabled={loading || !password || !agreed}>
+            {error && (
+              <p role="alert" aria-live="assertive" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {error}
+              </p>
+            )}
+            <Button type="submit" className="h-11 w-full" disabled={loading || !password || !agreed}>
               {loading ? "登录中..." : "登录"}
             </Button>
+            {(!password || !agreed) && (
+              <p className="text-center text-xs text-muted-foreground">
+                {!password ? "请输入密码" : "勾选使用须知后即可登录"}
+              </p>
+            )}
           </form>
         </div>
       </div>
@@ -199,7 +239,7 @@ export default function LoginPage() {
                 第二条 · 授权使用范围
               </h4>
               <p className="pl-7">
-                本软件仅供个人学习、代码研究、安全技术原理探讨，以及在您自行搭建的本地隔离环境中进行技术验证之用，适用于学习、学术研究、代码审阅等非攻击性、非破坏性用途。除本条明确许可的情形外，您不得将本软件用于任何其他目的。
+                本软件仅供个人用于待办、项目、日历、笔记、提醒及自动化任务管理等日常事项管理。除本条明确许可的情形外，您不得将本软件用于任何其他目的。
               </p>
             </section>
 
@@ -212,11 +252,7 @@ export default function LoginPage() {
                 第三条 · 禁止行为
               </h4>
               <ul className="ml-7 list-decimal space-y-1.5 rounded-lg border border-destructive/20 bg-destructive/5 p-3 pl-8 text-foreground/80 marker:text-destructive/70">
-                <li>
-                  严禁对任何网站、线上服务、他人或第三方所有的联网系统发起扫描、探测、利用或攻击（无论是否已获得授权、是否为您自有资产）；
-                </li>
-                <li>严禁将本软件用于任何实际的渗透测试、攻防对抗、红蓝演练或生产环境；</li>
-                <li>严禁将本软件用于非法入侵、数据窃取、勒索、拒绝服务（DoS/DDoS）或任何破坏性、犯罪性活动；</li>
+                <li>严禁将本软件用于任何非法、破坏性或侵犯他人权益的活动；</li>
                 <li>严禁移除、篡改或规避本软件及其输出中的任何版权、许可或安全提示信息；</li>
                 <li>严禁从事任何违反您所在国家或地区法律、法规及监管规定的行为。</li>
               </ul>

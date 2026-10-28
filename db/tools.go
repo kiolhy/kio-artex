@@ -165,7 +165,7 @@ func (d *DB) CreateCustomTool(t *Tool) error {
 	_, err := d.Exec(`
 INSERT INTO tools(key, system, description, schema, agents, enabled, kind, exec, deferred)
 VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8)`,
-		t.Key, t.Description, schema, agents, t.Enabled, t.Kind, exec, t.Deferred)
+		t.Key, t.Description, string(schema), string(agents), t.Enabled, t.Kind, string(exec), t.Deferred)
 	return err
 }
 
@@ -187,7 +187,7 @@ func (d *DB) UpdateCustomTool(t *Tool) error {
 	_, err := d.Exec(`
 UPDATE tools SET description=$2, schema=$3, agents=$4, enabled=$5, kind=$6, exec=$7, deferred=$8
 WHERE key=$1 AND system=false`,
-		t.Key, t.Description, schema, agents, t.Enabled, t.Kind, exec, t.Deferred)
+		t.Key, t.Description, string(schema), string(agents), t.Enabled, t.Kind, string(exec), t.Deferred)
 	return err
 }
 

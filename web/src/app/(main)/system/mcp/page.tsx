@@ -2,8 +2,25 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { PlusIcon, RefreshCwIcon, ServerIcon, Trash2Icon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  Loader2Icon,
+  PlusIcon,
+  RefreshCwIcon,
+  ServerIcon,
+  Trash2Icon,
+} from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,25 +72,63 @@ export default function MCPPage() {
   const [saving, setSaving] = React.useState(false);
   const [tools, setTools] = React.useState<MCPTool[]>([]);
   const [toolsLoading, setToolsLoading] = React.useState(false);
+  const [toolsError, setToolsError] = React.useState("");
   const [refreshing, setRefreshing] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
+  const [agentsError, setAgentsError] = React.useState("");
+  const [visibilityError, setVisibilityError] = React.useState("");
+  const [deleteTarget, setDeleteTarget] = React.useState<MCPServer | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
 
-  const load = React.useCallback(() => {
-    api.agents().then(setAgents).catch(() => {});
-    api
-      .mcpServers()
-      .then((ss) => {
-        setServers(ss);
-        ss.forEach((s) =>
-          api
-            .resourceVisibility("mcp", s.id)
-            .then((ids) => setVisibility((v) => ({ ...v, [s.id]: ids })))
-            .catch(() => {}),
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
+    setAgentsError("");
+    setVisibilityError("");
+
+    const [serversResult, agentsResult] = await Promise.allSettled([
+      api.mcpServers(),
+      api.agents(),
+    ]);
+
+    if (serversResult.status === "fulfilled") {
+      const ss = serversResult.value;
+      setServers(ss);
+      const visibilityResults = await Promise.allSettled(
+        ss.map(async (s) => {
+          const ids = await api.resourceVisibility("mcp", s.id);
+          return { id: s.id, ids };
+        }),
+      );
+      const next: Record<number, string[]> = {};
+      let visibilityFailures = 0;
+      for (const result of visibilityResults) {
+        if (result.status === "fulfilled") {
+          next[result.value.id] = result.value.ids;
+        } else {
+          visibilityFailures++;
+        }
+      }
+      setVisibility((current) => ({ ...current, ...next }));
+      if (visibilityFailures > 0) {
+        setVisibilityError(
+          `${visibilityFailures} 个 MCP 服务器的 Agent 可见性读取失败，授权状态可能不完整。`,
         );
-      })
-      .catch(() => {});
+      }
+    } else {
+      setLoadError((serversResult.reason as Error)?.message || "无法读取 MCP 服务器列表");
+    }
+
+    if (agentsResult.status === "fulfilled") {
+      setAgents(agentsResult.value);
+    } else {
+      setAgentsError((agentsResult.reason as Error)?.message || "无法读取 Agent 列表");
+    }
+    setLoading(false);
   }, []);
   React.useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   function setF(patch: Partial<FormState>) {
@@ -125,10 +180,12 @@ export default function MCPPage() {
 
   async function loadTools(id: number) {
     setToolsLoading(true);
+    setToolsError("");
     try {
       setTools(await api.mcpTools(id));
-    } catch {
+    } catch (e) {
       setTools([]);
+      setToolsError((e as Error).message || "无法读取工具列表");
     } finally {
       setToolsLoading(false);
     }
@@ -174,7 +231,7 @@ export default function MCPPage() {
       });
       toast.success(editing ? "已保存" : "已添加 MCP 服务器");
       if (!editing) setOpen(false);
-      load();
+      await load();
     } catch (e) {
       toast.error("保存失败：" + (e as Error).message);
     } finally {
@@ -189,7 +246,7 @@ export default function MCPPage() {
       const t = await api.refreshMcpServer(editing.id);
       setTools(t);
       toast.success(`发现 ${t.length} 个工具`);
-      load();
+      await load();
     } catch (e) {
       toast.error("刷新失败：" + (e as Error).message);
     } finally {
@@ -197,21 +254,26 @@ export default function MCPPage() {
     }
   }
 
-  async function removeServer(s: MCPServer) {
+  async function removeServer() {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
     try {
-      await api.deleteMcpServer(s.id);
-      toast.success(`已删除：${s.name}`);
-      setOpen(false);
-      load();
+      await api.deleteMcpServer(deleteTarget.id);
+      toast.success(`已删除：${deleteTarget.name}`);
+      if (editing?.id === deleteTarget.id) setOpen(false);
+      setDeleteTarget(null);
+      await load();
     } catch (e) {
       toast.error("删除失败：" + (e as Error).message);
+    } finally {
+      setDeleting(false);
     }
   }
 
   async function toggleEnabled(s: MCPServer) {
     try {
       await api.saveMcpServer({ ...s, enabled: !s.enabled });
-      load();
+      await load();
     } catch (e) {
       toast.error("操作失败：" + (e as Error).message);
     }
@@ -222,7 +284,7 @@ export default function MCPPage() {
     try {
       await api.toggleVisibility(agentId, "mcp", serverId, !on);
       toast.success(`${on ? "取消" : "授予"}「${agentName}」可见`);
-      load();
+      await load();
     } catch (e) {
       toast.error("操作失败：" + (e as Error).message);
     }
@@ -339,6 +401,24 @@ export default function MCPPage() {
         </div>
         {toolsLoading ? (
           <p className="text-muted-foreground text-sm">加载中…</p>
+        ) : toolsError ? (
+          <div className="border-destructive/40 bg-destructive/5 rounded-lg border p-3">
+            <div className="flex items-start gap-2">
+              <AlertCircleIcon className="text-destructive mt-0.5 size-4 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-destructive text-sm font-medium">工具列表读取失败</p>
+                <p className="text-muted-foreground mt-1 text-xs break-words">{toolsError}</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-3"
+                  onClick={() => editing && void loadTools(editing.id)}
+                >
+                  <RefreshCwIcon /> 重试
+                </Button>
+              </div>
+            </div>
+          </div>
         ) : tools.length === 0 ? (
           <p className="text-muted-foreground text-sm">尚未发现工具，点击刷新重新获取。</p>
         ) : (
@@ -366,17 +446,52 @@ export default function MCPPage() {
         <p className="text-muted-foreground text-sm">外部 MCP 工具服务器 · 按 Agent 授权可见</p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <button
-          type="button"
-          onClick={openAdd}
-          className="text-foreground/70 border-foreground/70 hover:bg-muted/60 hover:shadow-sm flex min-h-[116px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed transition"
-        >
-          <PlusIcon className="size-6" />
-          <span className="text-sm">添加 MCP</span>
-        </button>
+      {loadError && servers.length > 0 && (
+        <div className="border-destructive/40 bg-destructive/5 flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2">
+          <AlertCircleIcon className="text-destructive size-4 shrink-0" />
+          <p className="min-w-0 flex-1 text-sm">{loadError}</p>
+          <Button size="sm" variant="outline" onClick={() => void load()}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+      {(agentsError || visibilityError) && (
+        <div className="border-amber-500/40 bg-amber-500/10 rounded-lg border px-3 py-2 text-sm">
+          <p className="font-medium">部分配置未能完整加载</p>
+          {agentsError && <p className="text-muted-foreground mt-1 text-xs">Agent：{agentsError}</p>}
+          {visibilityError && (
+            <p className="text-muted-foreground mt-1 text-xs">{visibilityError}</p>
+          )}
+        </div>
+      )}
 
-        {servers.map((s) => (
+      {loading && servers.length === 0 ? (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-live="polite">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <div key={index} className="min-h-[180px] animate-pulse rounded-xl border bg-muted/30" />
+          ))}
+        </div>
+      ) : loadError && servers.length === 0 ? (
+        <div className="border-destructive/40 bg-destructive/5 rounded-xl border p-8 text-center">
+          <AlertCircleIcon className="text-destructive mx-auto size-7" />
+          <p className="mt-3 font-medium">无法读取 MCP 配置</p>
+          <p className="text-muted-foreground mt-1 text-sm">{loadError}</p>
+          <Button className="mt-4" size="sm" variant="outline" onClick={() => void load()}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <button
+            type="button"
+            onClick={openAdd}
+            className="text-foreground/70 border-foreground/70 hover:bg-muted/60 hover:shadow-sm flex min-h-[116px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed transition"
+          >
+            <PlusIcon className="size-6" />
+            <span className="text-sm">添加 MCP</span>
+          </button>
+
+          {servers.map((s) => (
           <Card
             key={s.id}
             onClick={() => openEdit(s)}
@@ -393,13 +508,13 @@ export default function MCPPage() {
                   <Switch
                     checked={s.enabled}
                     onCheckedChange={() => toggleEnabled(s)}
-                    aria-label="启用"
+                    aria-label={`${s.enabled ? "停用" : "启用"} MCP ${s.name}`}
                   />
                   <Button
                     size="icon"
                     variant="outline"
-                    aria-label="删除"
-                    onClick={() => removeServer(s)}
+                    aria-label={`删除 MCP ${s.name}`}
+                    onClick={() => setDeleteTarget(s)}
                   >
                     <Trash2Icon className="text-destructive" />
                   </Button>
@@ -417,6 +532,7 @@ export default function MCPPage() {
                     <label key={a.key} className="flex items-center gap-2 text-sm">
                       <Checkbox
                         checked={(visibility[s.id] ?? []).includes(a.id)}
+                        disabled={Boolean(agentsError || visibilityError)}
                         onCheckedChange={() => toggleVisibility(s.id, a.id, a.name)}
                       />
                       {a.name}
@@ -426,8 +542,9 @@ export default function MCPPage() {
               </div>
             </CardContent>
           </Card>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetContent
@@ -477,6 +594,37 @@ export default function MCPPage() {
           )}
         </SheetContent>
       </Sheet>
+
+      <AlertDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen && !deleting) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除 MCP 服务器？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将永久删除「{deleteTarget?.name}」的服务器配置、工具发现结果和 Agent 授权。相关
+              Agent 会立即失去这些工具，此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={deleting}
+              onClick={(event) => {
+                event.preventDefault();
+                void removeServer();
+              }}
+            >
+              {deleting && <Loader2Icon className="animate-spin" />}
+              {deleting ? "删除中…" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

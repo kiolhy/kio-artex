@@ -94,6 +94,10 @@ type Engine struct {
 	m        *Manager
 	debounce time.Duration
 
+	// shuttingDown blocks new task runtimes once the owning Server has begun its
+	// graceful shutdown. Existing runtimes are cancelled and awaited by Shutdown.
+	shuttingDown atomic.Bool
+
 	bc *Broadcaster // live activity pub/sub (SSE)
 
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
@@ -638,6 +642,7 @@ func (e *Engine) Broadcaster() *Broadcaster { return e.bc }
 // emitActivity persists one captured step AND fans it out to live subscribers,
 // from a single point so storage and the SSE stream never diverge.
 func (e *Engine) emitActivity(t *Task, r db.Activity) db.Activity {
+	r = db.SanitizeActivity(r)
 	id, err := e.appendActivity(t, r)
 	if err != nil {
 		// NO LONGER SILENT: dropping a record breaks command↔result pairing in the
@@ -746,6 +751,9 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
+	if e == nil || t == nil || e.shuttingDown.Load() {
+		return
+	}
 	workers := e.m.Workers()
 	e.deleteMu.RLock()
 	if e.IsDeleting(t.ID) {
@@ -773,6 +781,75 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	// 重启自动恢复时也可能只剩 running 意图,同样应跳过。
 	if has, _ := t.Store.HasActiveIntent(); !has {
 		t.Notify() // kick the first planning round (acted on once LLM is ready)
+	}
+}
+
+// Shutdown cancels every task runtime and in-flight planner/worker operation,
+// then waits for their final writes. Server calls this only after HTTP handlers
+// and server-owned background workers have stopped accepting new work.
+func (e *Engine) Shutdown(ctx context.Context) error {
+	if e == nil {
+		return nil
+	}
+	e.shuttingDown.Store(true)
+
+	e.runtimeMu.Lock()
+	runtimes := make([]*taskRuntime, 0, len(e.runtimes))
+	for _, rt := range e.runtimes {
+		if rt != nil {
+			runtimes = append(runtimes, rt)
+		}
+	}
+	for _, rt := range runtimes {
+		rt.cancel()
+	}
+	e.runtimeMu.Unlock()
+
+	e.execMu.Lock()
+	for _, cancel := range e.execCancel {
+		if cancel != nil {
+			cancel(agent.AbortShutdown)
+		}
+	}
+	e.execMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		for _, rt := range runtimes {
+			rt.wg.Wait()
+		}
+		// Detached intent/chat operations are counted in inflight but are not
+		// task-runtime members. Poll until all of them have committed or rolled
+		// back their final state.
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			pending := false
+			e.inflight.Range(func(_, value any) bool {
+				counter, ok := value.(*int64)
+				if ok && atomic.LoadInt64(counter) > 0 {
+					pending = true
+					return false
+				}
+				return true
+			})
+			if !pending {
+				close(done)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -876,8 +953,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// coalesces a burst; empty for time/heartbeat wakes).
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		ectx = agent.WithRunInfo(ectx, agent.RunInfo{TaskID: taskIDInt, RunKind: t.RunKind})
 		e.BeginLLMCall(t.ID)
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		met, reason, response, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
 		switch {
 		case err != nil && ectx.Err() == nil:
@@ -893,7 +971,39 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			// 归为 stopped(而非 blocked)。
 			e.cancelExec(t.ID, agent.AbortGoalMet)
 		default:
-			log.Printf("[planner] task %s 规划完成", t.ID)
+			stalled := false
+			if t.RunKind == "personal" && err == nil && !met {
+				var probeErr error
+				stalled, probeErr = t.Store.OpenGoalWithoutActiveIntent()
+				if probeErr != nil {
+					log.Printf("[planner] task %s 检查个人规划停摆失败: %v", t.ID, probeErr)
+				}
+			}
+			if shouldFailStalledPersonalPlanning(t.RunKind, met, err, stalled) {
+				detail := "个人任务规划停摆：仍有未完成目标，但 Planner 没有生成可执行步骤。请补充关键信息后重试。"
+				if text := truncateRunes(db.RedactSecrets(strings.TrimSpace(response)), 2000); text != "" {
+					detail += "\n\nPlanner 最后输出：\n" + text
+				}
+				won, statusErr := e.m.SetTaskStatusGuarded(t.ID, "failed")
+				switch {
+				case statusErr != nil:
+					log.Printf("[planner] task %s 个人规划停摆落失败态出错: %v", t.ID, statusErr)
+				case !won:
+					log.Printf("[planner] task %s 个人规划停摆时已是终态，保留现有状态", t.ID)
+				default:
+					log.Printf("[planner] task %s 个人规划停摆：open goal 存在且没有活动 Intent", t.ID)
+					e.emitActivity(t, db.Activity{
+						Worker:  "system",
+						Kind:    "result",
+						IsError: true,
+						Summary: "个人任务规划停摆，未生成可执行步骤",
+						Detail:  detail,
+					})
+					e.cancelExec(t.ID, agent.AbortPersonalPlanningStalled)
+				}
+			} else {
+				log.Printf("[planner] task %s 规划完成", t.ID)
+			}
 		}
 		e.touch(t.ID)
 	}
@@ -911,6 +1021,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// 每次唤醒(边沿或心跳)后重臂心跳:任意规划触发都重算这段静置计时。
 		resetPlannerTimer(heartbeat, interval)
 	}
+}
+
+func shouldFailStalledPersonalPlanning(runKind string, goalMet bool, planErr error, stalled bool) bool {
+	return runKind == "personal" && planErr == nil && !goalMet && stalled
 }
 
 func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
@@ -983,7 +1097,22 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
-	emit := func(r db.Activity) { e.emitActivity(t, r) }
+	var delivery db.Activity
+	hasDelivery := false
+	emit := func(r db.Activity) {
+		persisted := e.emitActivity(t, r)
+		if persisted.ID <= 0 || persisted.Kind != "result" || persisted.IsError {
+			return
+		}
+		text := strings.TrimSpace(persisted.Detail)
+		if text == "" {
+			text = strings.TrimSpace(persisted.Summary)
+		}
+		if text != "" {
+			delivery = persisted
+			hasDelivery = true
+		}
+	}
 	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
 	if ectx.Err() != nil || e.IsDeleting(t.ID) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
@@ -1014,6 +1143,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		label:  label,
 	}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	workCtx = agent.WithRunInfo(workCtx, agent.RunInfo{TaskID: wTaskID, IntentID: intent.ID, RunKind: t.RunKind})
 	e.BeginLLMCall(t.ID)
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
@@ -1143,7 +1273,39 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		state = "exhausted"
 		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
 	}
-	if state == "blocked" && isTaskLLMChainExhausted(err) {
+	var deliveryText string
+	if hasDelivery {
+		deliveryText = strings.TrimSpace(delivery.Detail)
+		if deliveryText == "" {
+			deliveryText = strings.TrimSpace(delivery.Summary)
+		}
+	}
+	facts, factsErr := []int64(nil), error(nil)
+	if state == "done" && personalDeliveryFactCandidate(t.RunKind, state, err, reason, deliveryText) && wrote.Total() == 0 {
+		facts, factsErr = t.Store.FactsYielded(intent.ID)
+	}
+	deliveryFactID := int64(0)
+	deliveryFactErr := factsErr
+	if deliveryFactErr == nil && personalDeliveryFactEligible(t.RunKind, state, err, reason, wrote, len(facts), deliveryText) {
+		deliveryFactID, deliveryFactErr = t.Store.AddFactYielded(intent.ID, map[string]any{
+			"summary":    "本次个人任务交付结果",
+			"detail":     deliveryText,
+			"evidence":   "worker result",
+			"confidence": "observed",
+		}, name, nil)
+		if deliveryFactErr == nil {
+			log.Printf("[worker %s] task %s 意图 #%d 交付事实 #%d 已写入", name, t.ID, intent.ID, deliveryFactID)
+		}
+	}
+	if deliveryFactErr != nil {
+		log.Printf("[worker %s] task %s 意图 #%d 交付事实落库失败，本次不报告完成: %v", name, t.ID, intent.ID, deliveryFactErr)
+		state = "blocked"
+	}
+	if state == "blocked" && deliveryFactErr != nil {
+		if reasonErr := t.Store.SetIntentBlockedReason(intent.ID, "delivery_fact_persist_failed"); reasonErr != nil {
+			log.Printf("[worker %s] task %s 意图 #%d 交付失败原因落库失败: %v", name, t.ID, intent.ID, reasonErr)
+		}
+	} else if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
 	} else {
 		if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
@@ -1154,6 +1316,20 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	e.touch(t.ID)
 	t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
 	return true
+}
+
+func personalDeliveryFactCandidate(runKind, state string, runErr error, reason harness.TerminalReason, text string) bool {
+	return runKind == "personal" &&
+		state == "done" &&
+		runErr == nil &&
+		reason == harness.ReasonCompleted &&
+		strings.TrimSpace(text) != ""
+}
+
+func personalDeliveryFactEligible(runKind, state string, runErr error, reason harness.TerminalReason, wrote agent.WriteCounts, existingFacts int, text string) bool {
+	return personalDeliveryFactCandidate(runKind, state, runErr, reason, text) &&
+		wrote.Total() == 0 &&
+		existingFacts == 0
 }
 
 // runDetachedIntent runs one paused intent OUTSIDE the worker pool in its own

@@ -38,6 +38,7 @@ func workflowTool(t *testing.T, tools []actool.CoreTool, name string) actool.Cor
 }
 
 func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
+	t.Skip("渗透测试/发现功能已从个人工作台移除")
 	s, initial, request := trafficEvidenceServer(t)
 	pg := s.m.pg
 	ctx := context.Background()
@@ -263,6 +264,7 @@ func TestFindingWorkflowMigrationPreservesUserConfiguration(t *testing.T) {
 }
 
 func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
+	t.Skip("渗透测试/发现功能已从个人工作台移除")
 	s, f, request := trafficEvidenceServer(t)
 	pg := s.m.pg
 	ctx := context.Background()

@@ -2,7 +2,19 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { EyeIcon, GitCompareIcon, InfoIcon, PencilIcon, RotateCcwIcon, SaveIcon, Trash2Icon, XIcon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  EyeIcon,
+  GitCompareIcon,
+  InfoIcon,
+  Loader2Icon,
+  PencilIcon,
+  RefreshCwIcon,
+  RotateCcwIcon,
+  SaveIcon,
+  Trash2Icon,
+  XIcon,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -68,18 +80,49 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const [ttTurns, setTtTurns] = React.useState("0");
   const [ttTurnsDefault, setTtTurnsDefault] = React.useState(5);
   const [settings, setSettings] = React.useState<Settings | null>(null);
+  const [detailError, setDetailError] = React.useState("");
+  const [mcpError, setMcpError] = React.useState("");
+  const [skillsError, setSkillsError] = React.useState("");
+  const [toolsError, setToolsError] = React.useState("");
+  const [settingsError, setSettingsError] = React.useState("");
+
+  const reloadOptions = React.useCallback(() => {
+    api.mcpServers()
+      .then((rows) => {
+        setMcp(rows);
+        setMcpError("");
+      })
+      .catch((e) => setMcpError((e as Error).message || "MCP 列表读取失败"));
+    api.skills()
+      .then((rows) => {
+        setSkills(rows);
+        setSkillsError("");
+      })
+      .catch((e) => setSkillsError((e as Error).message || "Skill 列表读取失败"));
+    api.tools()
+      .then((rows) => {
+        setTools(rows);
+        setToolsError("");
+      })
+      .catch((e) => setToolsError((e as Error).message || "工具列表读取失败"));
+    api.settings()
+      .then((next) => {
+        setSettings(next);
+        setSettingsError("");
+      })
+      .catch((e) => setSettingsError((e as Error).message || "全局设置读取失败"));
+  }, []);
 
   React.useEffect(() => {
-    api.mcpServers().then(setMcp).catch(() => {});
-    api.skills().then(setSkills).catch(() => {});
-    api.tools().then(setTools).catch(() => {});
-    api.settings().then(setSettings).catch(() => {});
-  }, []);
+    reloadOptions();
+  }, [reloadOptions]);
   // global gates: traffic tools need 流量捕获, web search needs the master switch.
   const captureOn = !!settings?.traffic_capture;
   const webSearchGlobalOn = !!settings?.web_search_enabled;
 
   const reload = React.useCallback(() => {
+    setLoaded(false);
+    setDetailError("");
     api
       .getAgent(agentKey)
       .then((d) => {
@@ -105,7 +148,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
         setTtTurns(String(d.task_timeout_wrapup_max_turns ?? 0));
         setTtTurnsDefault(d.task_timeout_wrapup_max_turns_default ?? 5);
       })
-      .catch(() => setDetail(null))
+      .catch((e) => setDetailError((e as Error).message || "Agent 配置读取失败"))
       .finally(() => setLoaded(true));
   }, [agentKey]);
   React.useEffect(() => {
@@ -233,6 +276,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   async function toggleTool(t: Tool) {
     const on = t.agents.includes(agentKey);
     const nextAgents = on ? t.agents.filter((k) => k !== agentKey) : [...t.agents, agentKey];
+    const previousTools = tools;
     // optimistic update
     setTools((ts) => ts.map((x) => (x.key === t.key ? { ...x, agents: nextAgents } : x)));
     try {
@@ -246,11 +290,33 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
       onSaved?.(); // refresh the list so the card's 工具 count stays in sync
     } catch (e) {
       toast.error("保存工具绑定失败：" + (e as Error).message);
+      setTools(previousTools);
       reload();
-      api.tools().then(setTools).catch(() => {});
+      api
+        .tools()
+        .then((rows) => {
+          setTools(rows);
+          setToolsError("");
+        })
+        .catch((refreshError) => {
+          const message = (refreshError as Error).message || "未知错误";
+          setToolsError(message);
+          toast.error("刷新工具列表也失败：" + message);
+        });
     }
   }
 
+  if (loaded && detailError && !detail) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        <AlertCircleIcon className="text-destructive size-5" />
+        <p className="text-destructive text-sm">Agent「{agentKey}」读取失败：{detailError}</p>
+        <Button size="sm" variant="outline" onClick={() => { reload(); reloadOptions(); }}>
+          <RefreshCwIcon /> 重试
+        </Button>
+      </div>
+    );
+  }
   if (loaded && !detail) {
     return <div className="text-muted-foreground p-6 text-center text-sm">未找到 Agent：{agentKey}</div>;
   }
@@ -266,6 +332,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const showLLM = true;
   // triggers (P3) only attach to custom agents.
   const isCustom = !!detail && !detail.agent?.builtin;
+  const optionError = mcpError || skillsError || toolsError || settingsError;
 
   return (
     <Tabs defaultValue="prompt" className="flex min-h-0 flex-1 flex-col">
@@ -277,6 +344,26 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
         <TabsTrigger value="tools">Tools</TabsTrigger>
         {isCustom && <TabsTrigger value="triggers">触发</TabsTrigger>}
       </TabsList>
+
+      {detailError && (
+        <div className="mx-4 mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
+          <p className="text-destructive text-sm">刷新 Agent 配置失败，当前仍显示上一次成功读取的内容：{detailError}</p>
+          <Button size="sm" variant="outline" onClick={reload}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+      {optionError && (
+        <div className="mx-4 mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2">
+          <p className="text-amber-700 dark:text-amber-300 text-sm">
+            {mcpError || skillsError || toolsError || settingsError}
+            {[mcpError, skillsError, toolsError, settingsError].filter(Boolean).length > 1 ? "（部分配置未加载）" : ""}
+          </p>
+          <Button size="sm" variant="outline" onClick={reloadOptions}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
 
       {/* 配置 + 提示词 */}
       <TabsContent value="prompt" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
@@ -370,7 +457,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                     <button type="button" onClick={() => setPrompt((p) => `${p}{{.${v.name}}}`)}
                       className="hover:bg-muted inline-flex items-center gap-1 rounded-md border bg-muted/40 px-2 py-1 font-mono text-xs">
                       {`{{.${v.name}}}`}
-                      <Badge variant="secondary" className="px-1 py-0 text-[10px]">{v.source}</Badge>
+                    <Badge variant="secondary" className="px-1 py-0 text-xs">{v.source}</Badge>
                     </button>
                   </TooltipTrigger>
                   <TooltipContent className="max-w-xs">
@@ -601,7 +688,16 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
               <span className="text-muted-foreground ml-auto text-xs">{m.transport}</span>
             </label>
           ))}
-          {mcp.length === 0 && <span className="text-muted-foreground text-xs">（暂无 MCP）</span>}
+          {mcpError ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+              <span className="text-destructive text-sm">MCP 列表读取失败：{mcpError}</span>
+              <Button size="sm" variant="outline" onClick={reloadOptions}>
+                <RefreshCwIcon /> 重试
+              </Button>
+            </div>
+          ) : mcp.length === 0 ? (
+            <span className="text-muted-foreground text-xs">（暂无 MCP）</span>
+          ) : null}
         </div>
       </TabsContent>
 
@@ -616,7 +712,16 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
               {s.description && <span className="text-muted-foreground ml-auto truncate text-xs">{s.description}</span>}
             </label>
           ))}
-          {skills.length === 0 && <span className="text-muted-foreground text-xs">（暂无 Skill）</span>}
+          {skillsError ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+              <span className="text-destructive text-sm">Skill 列表读取失败：{skillsError}</span>
+              <Button size="sm" variant="outline" onClick={reloadOptions}>
+                <RefreshCwIcon /> 重试
+              </Button>
+            </div>
+          ) : skills.length === 0 ? (
+            <span className="text-muted-foreground text-xs">（暂无 Skill）</span>
+          ) : null}
         </div>
       </TabsContent>
 
@@ -642,10 +747,10 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                 />
                 <span className="font-mono text-xs">{t.key}</span>
                 {isTraffic && (
-                  <Badge variant="secondary" className="px-1 py-0 text-[9px]">流量</Badge>
+                  <Badge variant="secondary" className="px-1 py-0 text-xs">流量</Badge>
                 )}
                 {!t.enabled && (
-                  <Badge variant="outline" className="text-destructive px-1 py-0 text-[9px]">已停用</Badge>
+                  <Badge variant="outline" className="text-destructive px-1 py-0 text-xs">已停用</Badge>
                 )}
                 {gated ? (
                   <span className="text-muted-foreground ml-auto text-xs">需开启流量捕获</span>
@@ -659,7 +764,16 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
               </label>
             );
           })}
-          {tools.length === 0 && <span className="text-muted-foreground text-xs">（暂无工具）</span>}
+          {toolsError ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+              <span className="text-destructive text-sm">工具列表读取失败：{toolsError}</span>
+              <Button size="sm" variant="outline" onClick={reloadOptions}>
+                <RefreshCwIcon /> 重试
+              </Button>
+            </div>
+          ) : tools.length === 0 ? (
+            <span className="text-muted-foreground text-xs">（暂无工具）</span>
+          ) : null}
         </div>
       </TabsContent>
 
@@ -733,6 +847,10 @@ function DiffView({ oldText, newText }: { oldText: string; newText: string }) {
 function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent }) {
   const [triggers, setTriggers] = React.useState<AgentTrigger[]>([]);
   const [tools, setTools] = React.useState<Tool[]>([]);
+  const [triggersLoading, setTriggersLoading] = React.useState(true);
+  const [triggersError, setTriggersError] = React.useState("");
+  const [toolsLoading, setToolsLoading] = React.useState(true);
+  const [triggerToolsError, setTriggerToolsError] = React.useState("");
   // 触发后处理策略(每 agent);初值来自 agent detail,改动即保存。
   const [runMode, setRunMode] = React.useState<"serial" | "parallel">(agent?.trigger_run_mode ?? "serial");
   const [mergeMode, setMergeMode] = React.useState<"by_task" | "all" | "none">(agent?.trigger_merge_mode ?? "all");
@@ -750,6 +868,7 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
   }) {
     try {
       await api.saveAgentConfig(agentKey, patch);
+      toast.success("触发后处理策略已保存");
     } catch (e) {
       toast.error("保存策略失败：" + (e as Error).message);
     }
@@ -773,14 +892,27 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
   const [editingId, setEditingId] = React.useState<number | null>(null);
 
   const reload = React.useCallback(() => {
-    api.agentTriggers(agentKey).then(setTriggers).catch(() => setTriggers([]));
+    setTriggersLoading(true);
+    setTriggersError("");
+    api.agentTriggers(agentKey)
+      .then(setTriggers)
+      .catch((e) => setTriggersError((e as Error).message || "触发器列表读取失败"))
+      .finally(() => setTriggersLoading(false));
   }, [agentKey]);
   React.useEffect(() => {
     reload();
   }, [reload]);
-  React.useEffect(() => {
-    api.tools().then(setTools).catch(() => setTools([]));
+  const reloadTools = React.useCallback(() => {
+    setToolsLoading(true);
+    setTriggerToolsError("");
+    api.tools()
+      .then(setTools)
+      .catch((e) => setTriggerToolsError((e as Error).message || "工具列表读取失败"))
+      .finally(() => setToolsLoading(false));
   }, []);
+  React.useEffect(() => {
+    reloadTools();
+  }, [reloadTools]);
 
   function toggleTool(key: string) {
     setToolNames((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -833,6 +965,10 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
     }
     if (onToolCall && toolNames.length === 0) {
       toast.error("工具调用触发至少选择一个工具");
+      return;
+    }
+    if (onToolCall && triggerToolsError) {
+      toast.error("工具列表尚未成功加载，无法保存工具调用触发");
       return;
     }
     const body = {
@@ -1066,19 +1202,33 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
                 选择要监听的工具（至少一个）；任务执行中这些工具每次<b>调用完成</b>都会触发。已选 {toolNames.length} 个。
               </div>
               <div className="max-h-40 overflow-y-auto rounded-md border p-2">
-                {tools.length === 0 && <span className="text-muted-foreground text-xs">（工具列表为空）</span>}
-                <div className="grid gap-1">
-                  {tools.map((tool) => (
-                    <label key={tool.key} className="flex items-start gap-2 text-xs">
-                      <Checkbox className="mt-0.5" checked={toolNames.includes(tool.key)}
-                        onCheckedChange={() => toggleTool(tool.key)} />
-                      <span className="min-w-0">
-                        <span className="font-medium">{tool.key}</span>
-                        {tool.description && <span className="text-muted-foreground line-clamp-1"> {tool.description}</span>}
-                      </span>
-                    </label>
-                  ))}
-                </div>
+                {toolsLoading ? (
+                  <span className="text-muted-foreground inline-flex items-center gap-2 text-xs">
+                    <Loader2Icon className="size-3.5 animate-spin" /> 工具列表加载中…
+                  </span>
+                ) : triggerToolsError ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-destructive text-xs">工具列表读取失败：{triggerToolsError}</span>
+                    <Button size="sm" variant="outline" onClick={reloadTools}>
+                      <RefreshCwIcon /> 重试
+                    </Button>
+                  </div>
+                ) : tools.length === 0 ? (
+                  <span className="text-muted-foreground text-xs">（工具列表为空）</span>
+                ) : (
+                  <div className="grid gap-1">
+                    {tools.map((tool) => (
+                      <label key={tool.key} className="flex items-start gap-2 text-xs">
+                        <Checkbox className="mt-0.5" checked={toolNames.includes(tool.key)}
+                          onCheckedChange={() => toggleTool(tool.key)} />
+                        <span className="min-w-0">
+                          <span className="font-medium">{tool.key}</span>
+                          {tool.description && <span className="text-muted-foreground line-clamp-1"> {tool.description}</span>}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
               </div>
               <Textarea className="text-xs" rows={2} value={toolCallMsg}
                 placeholder="工具被调用时发给 agent 的话（系统会附带任务信息、工具入参与返回内容）" onChange={(e) => setToolCallMsg(e.target.value)} />
@@ -1112,8 +1262,21 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
       {/* 已有触发器 */}
       <div className="grid gap-2">
         <Label className="text-muted-foreground text-xs">已有触发器</Label>
-        {triggers.length === 0 && <span className="text-muted-foreground text-xs">（暂无）</span>}
-        {triggers.map((t) => (
+        {triggersLoading ? (
+          <span className="text-muted-foreground inline-flex items-center gap-2 text-xs">
+            <Loader2Icon className="size-3.5 animate-spin" /> 触发器加载中…
+          </span>
+        ) : triggersError ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+            <span className="text-destructive text-sm">触发器列表读取失败：{triggersError}</span>
+            <Button size="sm" variant="outline" onClick={reload}>
+              <RefreshCwIcon /> 重试
+            </Button>
+          </div>
+        ) : triggers.length === 0 ? (
+          <span className="text-muted-foreground text-xs">（暂无触发器）</span>
+        ) : null}
+        {!triggersLoading && triggers.map((t) => (
           <div
             key={t.id}
             className={cn(
@@ -1126,7 +1289,7 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="font-medium">{condLabel(t)}</span>
                 {!t.enabled && (
-                  <Badge variant="outline" className="text-destructive px-1 py-0 text-[9px]">已停用</Badge>
+                  <Badge variant="outline" className="text-destructive px-1 py-0 text-xs">已停用</Badge>
                 )}
               </div>
               <div className="text-muted-foreground grid gap-0.5 text-xs">
@@ -1144,11 +1307,11 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
               </div>
             </div>
             <Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground"
-              onClick={() => startEdit(t)} title="编辑">
+              onClick={() => startEdit(t)} title="编辑" aria-label={`编辑触发器 ${t.id}`}>
               <PencilIcon className="size-3.5" />
             </Button>
             <Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-destructive"
-              onClick={() => del(t.id)} title="删除">
+              onClick={() => del(t.id)} title="删除" aria-label={`删除触发器 ${t.id}`}>
               <Trash2Icon className="size-3.5" />
             </Button>
           </div>

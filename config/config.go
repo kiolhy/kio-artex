@@ -24,10 +24,18 @@ type Database struct {
 	SSLMode  string `json:"sslmode"`
 }
 
+// FCM is the Firebase Cloud Messaging push configuration.
+type FCM struct {
+	// ServiceAccountJSONPath is the filesystem path to the Firebase service
+	// account JSON key used to obtain an OAuth2 access token for FCM HTTP v1.
+	ServiceAccountJSONPath string `json:"service_account_json_path"`
+}
+
 // Config is the on-disk config file shape.
 type Config struct {
 	Database Database `json:"database"`
 	SkillDir string   `json:"skill_dir"`
+	FCM      FCM      `json:"fcm"`
 }
 
 // BaseDir is the directory that anchors all runtime artifacts (config.json and

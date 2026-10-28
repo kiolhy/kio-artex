@@ -293,6 +293,14 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
 }
 
+func workerSystemForRun(ctx context.Context, proxyAddr, caCert, dataDir, runDir string) string {
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		body := renderSystemForRun(ctx, "worker", personalWorkerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr()})
+		return body + personalArtifactSpec(runDir)
+	}
+	return workerSystem(proxyAddr, caCert, dataDir, runDir)
+}
+
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
 // the intent is the worker's whole job. It used to live in the system prompt; it now
 // rides in the first user turn (together with the situational overview) so the system
@@ -315,6 +323,13 @@ func intentAssetIDs(intent *db.Node) []int64 {
 
 func renderIntentTask(intent *db.Node) string {
 	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
+}
+
+func renderIntentTaskForRun(ctx context.Context, intent *db.Node) string {
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		return fmt.Sprintf("\n\n【你领到的工作项（本次唯一任务：完成后停止）】：\n%s\n工作项 id: %d（写回事实时传它）", string(intent.Payload), intent.ID)
+	}
+	return renderIntentTask(intent)
 }
 
 // renderWorkerGraphOverview folds the global situational snapshot into the worker's
@@ -377,7 +392,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// worker 刻意不给 MultiEdit/Glob/Grep：文件精改用 Edit、检索走 Bash(grep/find)，
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
+	ri := RunInfoFrom(ctx)
+	ri.TaskID = taskID
+	ri.ExplorationID = explorationID(ts)
+	ri.IntentID = intent.ID
+	ctx = WithRunInfo(ctx, ri)
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 
@@ -393,12 +412,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
+	sysBody := workerSystemForRun(ctx, w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
-	sysBody += renderIntentTask(intent)
+	sysBody += renderIntentTaskForRun(ctx, intent)
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
 			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {

@@ -37,6 +37,40 @@ type ChatAgent struct {
 	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
 }
 
+// ChatOptions adds capabilities that are valid for one turn only. ExtraTools
+// pass through a code-owned allowlist, the personal run filter and panic guard;
+// being host-injected never makes a tool exempt from those boundaries.
+type ChatOptions struct {
+	ExtraTools         []actool.CoreTool
+	SystemPromptSuffix string
+}
+
+// turnToolAllowlist is intentionally explicit. New host-provided tools must be
+// reviewed and added here instead of becoming available through accidental
+// injection. create_work_task is the only current main-agent handoff capability.
+var turnToolAllowlist = map[string]bool{
+	"create_work_task": true,
+}
+
+func appendAllowedTurnTools(ctx context.Context, tools, extras []actool.CoreTool) []actool.CoreTool {
+	seen := make(map[string]bool, len(tools)+len(extras))
+	for _, tool := range tools {
+		seen[tool.Name()] = true
+	}
+	for _, tool := range extras {
+		if tool == nil || !turnToolAllowlist[tool.Name()] || seen[tool.Name()] {
+			continue
+		}
+		seen[tool.Name()] = true
+		tools = append(tools, tool)
+	}
+	tools = personalToolFilter(ctx, tools)
+	for i, tool := range tools {
+		tools[i] = guardPanic(tool)
+	}
+	return tools
+}
+
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
 	return &ChatAgent{prov: prov, model: model, workDir: workDir, tx: tx, window: window}
 }
@@ -83,8 +117,12 @@ func chatWorkDirSpec(workDir string) string {
 
 // chatSystem renders the DB-managed prompt body for agentKey. Custom agents have
 // no per-key in-code default, so DefaultAssistantPrompt is the render fallback.
-func chatSystem(agentKey, dataDir, workDir string) string {
-	return renderSystem(agentKey, DefaultAssistantPrompt, chatVars{DataDir: dataDir, Now: nowStr()}) + chatWorkDirSpec(workDir)
+func chatSystem(ctx context.Context, agentKey, dataDir, workDir string) string {
+	def := DefaultAssistantPrompt
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		def = personalAssistantPrompt
+	}
+	return renderSystemForRun(ctx, agentKey, def, chatVars{DataDir: dataDir, Now: nowStr()}) + chatWorkDirSpec(workDir)
 }
 
 // chatVars carries the runtime variables a custom agent's prompt may reference.
@@ -103,6 +141,13 @@ type chatVars struct{ DataDir, Now string }
 // tool_use / tool_result / text / result), tagged with the agent key as the
 // worker lane.
 func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message string, maxTurns int, maxDuration time.Duration, webSearch bool, emit func(db.Activity)) (string, error) {
+	return c.ChatWithOptions(ctx, agentKey, sessionID, message, maxTurns, maxDuration, webSearch, ChatOptions{}, emit)
+}
+
+// ChatWithOptions is Chat plus turn-scoped tools and prompt guidance. The host
+// uses it for the main agent's create_work_task handoff without exposing that
+// capability to custom agents or scheduler-generated runs.
+func (c *ChatAgent) ChatWithOptions(ctx context.Context, agentKey, sessionID, message string, maxTurns int, maxDuration time.Duration, webSearch bool, chatOpts ChatOptions, emit func(db.Activity)) (string, error) {
 	// gate the global web-search opts by this agent's own flag.
 	ws := c.webSearch
 	if !webSearch {
@@ -119,11 +164,19 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// visible skills/MCP and lets the DB tools table filter/override. DefaultTools
 	// have no tools-table rows, so they always pass through.
 	base := actool.DefaultTools()
-	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID})
+	ri := RunInfoFrom(ctx)
+	ri.SessionID = sessionID
+	// Every standalone conversation is a personal assistant conversation. Task
+	// automation carries an explicit RunKind injected by the server.
+	ri.RunKind = "personal"
+	ctx = WithRunInfo(ctx, ri)
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
+	if len(chatOpts.ExtraTools) > 0 {
+		tools = appendAllowedTurnTools(ctx, tools, chatOpts.ExtraTools)
+	}
 
-	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)
+	system, boundary := deferredSystem(chatSystem(ctx, agentKey, c.workDir, sessionWorkDir)+chatOpts.SystemPromptSuffix, def)
 	opts := agentcore.Options{
 		Provider:        c.prov,
 		SystemPrompt:    system,

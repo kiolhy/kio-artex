@@ -127,20 +127,28 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 	// Description rides in the user message (same channel as the goal), NOT via the
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
-	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{DataDir: dataDir, Now: nowStr()})
+	def := goalsDefaultTmpl
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		def = personalGoalsDefaultTmpl
+	}
+	sys := renderSystemForRun(ctx, "goals", def, GoalsVars{DataDir: dataDir, Now: nowStr()})
 	// set_constraints 始终可用(不依赖 asset store):正文已含「先抽操作约束再拆目标」这步
 	// (可在 agent 编辑页改措辞),这里只需接上工具。
 	tools := []actool.CoreTool{tsx.setGoals(), tsx.setConstraints()}
 	// Wire add_task_scope only when we have a real asset store + task to write to.
 	// The scope-extraction tail is appended in lockstep so the prompt never asks for
 	// a tool that isn't present.
-	if as != nil && taskID > 0 {
+	if as != nil && taskID > 0 && RunInfoFrom(ctx).RunKind != "personal" {
 		tools = append(tools, tsx.addTaskScope())
 		sys += goalsScopeTail
 	}
 	userMsg := "任务目标：\n" + goalText
 	if d := strings.TrimSpace(desc); d != "" {
-		userMsg += "\n\n任务描述（背景信息，可能含靶标范围/flag 数量/交战说明；仅供参考，不要臆造其中未提及的内容）：\n" + d
+		if RunInfoFrom(ctx).RunKind == "personal" {
+			userMsg += "\n\n任务背景与要求（仅供参考，不要臆造其中未提及的内容）：\n" + d
+		} else {
+			userMsg += "\n\n任务描述（背景信息，可能含靶标范围/flag 数量/交战说明；仅供参考，不要臆造其中未提及的内容）：\n" + d
+		}
 	}
 	// Use captureRun so every LLM step is emitted as an activity record (visible in
 	// the plan tab under the round-0 marker). Falls back gracefully when emit is nil.

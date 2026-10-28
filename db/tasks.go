@@ -13,6 +13,7 @@ import (
 type Task struct {
 	ID            int64      `json:"id"`
 	Name          string     `json:"name"` // 可选任务名称;空=未命名
+	RunKind       string     `json:"run_kind"`
 	CategoryID    *int64     `json:"category_id,omitempty"`
 	CategoryName  string     `json:"category_name,omitempty"`
 	Pinned        bool       `json:"pinned"`
@@ -145,6 +146,7 @@ func (d *DB) CreateTask(description, goal string, llmProfileID *int64, timeoutSe
 // with the task/exploration row.
 type TaskCreateOptions struct {
 	Name                 string // 可选任务名称;空=未命名
+	RunKind              string // pentest(默认) | personal
 	CategoryID           *int64
 	SourceTaskIDs        []int64
 	CompanyIDs           []int64
@@ -161,6 +163,12 @@ type TaskCreateOptions struct {
 // CreateTaskWithOptions creates an exploration, task, direct source relations,
 // and the ordered task LLM chain in one transaction.
 func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOptions) (*Task, error) {
+	if opts.RunKind == "" {
+		opts.RunKind = "pentest"
+	}
+	if opts.RunKind != "pentest" && opts.RunKind != "personal" {
+		return nil, fmt.Errorf("invalid task run kind %q", opts.RunKind)
+	}
 	if len(opts.SourceTaskIDs) > MaxTaskSourceCount {
 		return nil, fmt.Errorf("too many source tasks: got %d, maximum is %d", len(opts.SourceTaskIDs), MaxTaskSourceCount)
 	}
@@ -216,7 +224,7 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		active = &id
 	}
 	t := &Task{
-		Name: opts.Name, CategoryID: opts.CategoryID, CategoryName: categoryName,
+		Name: opts.Name, RunKind: opts.RunKind, CategoryID: opts.CategoryID, CategoryName: categoryName,
 		Description: description, Goal: goal, ExplorationID: expID,
 		LLMProfileID: active, ActiveLLMProfileID: active,
 		LLMProfileIDs:  append([]int64(nil), opts.LLMProfileIDs...),
@@ -226,9 +234,9 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		CoverageEnabled: coverageEnabled,
 	}
 	if err := tx.QueryRow(`
-INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled)
-VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9)
-RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
+INSERT INTO tasks(name, run_kind, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10)
+RETURNING id, status, paused, created_at`, opts.Name, opts.RunKind, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
 		return nil, err
 	}
 	if err := insertTaskRelations(tx, t.ID, opts.SourceTaskIDs); err != nil {
@@ -342,13 +350,13 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 	return nil
 }
 
-const taskCols = `id, COALESCE(name,''), category_id,
+const taskCols = `id, COALESCE(name,''), COALESCE(run_kind,'pentest'), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
 description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.RunKind, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
 	t.Pinned = t.PinnedAt != nil

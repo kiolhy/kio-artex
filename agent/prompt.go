@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"text/template"
 	"time"
 )
@@ -50,6 +51,20 @@ func renderSystem(agentKey, def string, vars any) string {
 		return out
 	}
 	return def
+}
+
+// renderSystemForRun keeps persisted prompt overrides for historical security
+// runs, but personal runs always use the code-owned personal prompt. A personal
+// task must never inherit an operator's old engagement/pentest prompt.
+func renderSystemForRun(ctx context.Context, agentKey, def string, vars any) string {
+	ri := RunInfoFrom(ctx)
+	if ri.RunKind == "personal" {
+		if out, err := renderTmpl(def, vars); err == nil {
+			return out
+		}
+		return def
+	}
+	return renderSystem(agentKey, def, vars)
 }
 
 func renderTmpl(tmpl string, vars any) (string, error) {

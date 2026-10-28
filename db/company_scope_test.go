@@ -326,15 +326,20 @@ func TestCompanyScopeAttribution(t *testing.T) {
 		d.Close()
 		t.Fatalf("startMax: %v", err)
 	}
-	t.Cleanup(func() {
-		_, _ = d.Exec(`DELETE FROM assets WHERE id > $1`, startMax)
-		d.Close()
-	})
+	// Register the connection close before every row cleanup. t.Cleanup runs
+	// last-in-first-out, so the connection remains available when rows are
+	// removed and is closed only after all cleanup statements have run.
+	t.Cleanup(func() { d.Close() })
 
 	uniq := startMax + 1
 	root := fmt.Sprintf("scopetest%d.com", uniq)
 	sub := "api." + root
-	ipIn := "198.51.100.9"
+	// Use a /24 derived from the current asset id. Re-running after an
+	// interrupted test must not collide with a stale company scope; equal-length
+	// CIDRs are resolved by company id, so reusing a fixed TEST-NET block makes
+	// the assertion depend on unrelated database history.
+	cidr := fmt.Sprintf("10.%d.%d.0/24", (uniq/256)%256, uniq%256)
+	ipIn := fmt.Sprintf("10.%d.%d.9", (uniq/256)%256, uniq%256)
 	ipOut := "203.0.113.9"
 	outDomain := fmt.Sprintf("other%d.net", uniq)
 
@@ -342,19 +347,29 @@ func TestCompanyScopeAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertCompany: %v", err)
 	}
+	createdAssetIDs := make([]int64, 0, 5)
+	t.Cleanup(func() {
+		if _, err := d.Exec(`DELETE FROM assets WHERE id = ANY($1)`, createdAssetIDs); err != nil {
+			t.Errorf("cleanup scoped assets: %v", err)
+		}
+		if _, err := d.Exec(`DELETE FROM companies WHERE id = $1`, cid); err != nil {
+			t.Errorf("cleanup scoped company: %v", err)
+		}
+	})
 
 	// a pre-existing asset (inserted BEFORE any scope) — must be back-filled.
 	preID, err := as.UpsertSubdomain(UpsertSubdomainReq{Domain: sub})
 	if err != nil {
 		t.Fatalf("pre upsert: %v", err)
 	}
+	createdAssetIDs = append(createdAssetIDs, preID)
 	var preCompanyID *int64
 	d.QueryRow(`SELECT company_id FROM assets WHERE id = $1`, preID).Scan(&preCompanyID)
 	if preCompanyID != nil {
 		t.Fatalf("pre-scope asset should be unattributed, got %v", *preCompanyID)
 	}
 
-	cs.AddScope(cid, []string{root, "198.51.100.0/24"}, "unit test")
+	cs.AddScope(cid, []string{root, cidr}, "unit test")
 
 	mustCid := func(id int64, want int64, label string) {
 		var cID *int64
@@ -382,12 +397,14 @@ func TestCompanyScopeAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertIP in: %v", err)
 	}
+	createdAssetIDs = append(createdAssetIDs, ipInID)
 	mustCid(ipInID, cid, "in-CIDR ip (insert-time)")
 
 	sub2ID, err := as.UpsertSubdomain(UpsertSubdomainReq{Domain: "www." + root})
 	if err != nil {
 		t.Fatalf("UpsertSubdomain: %v", err)
 	}
+	createdAssetIDs = append(createdAssetIDs, sub2ID)
 	mustCid(sub2ID, cid, "new subdomain (insert-time)")
 
 	// out of scope stays unattributed.
@@ -395,11 +412,13 @@ func TestCompanyScopeAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertRootDomain out: %v", err)
 	}
+	createdAssetIDs = append(createdAssetIDs, outID)
 	mustNil(outID, "out-of-scope domain")
 
 	ipOutID, err := as.UpsertIP(UpsertIPReq{IP: ipOut})
 	if err != nil {
 		t.Fatalf("UpsertIP out: %v", err)
 	}
+	createdAssetIDs = append(createdAssetIDs, ipOutID)
 	mustNil(ipOutID, "out-of-CIDR ip")
 }

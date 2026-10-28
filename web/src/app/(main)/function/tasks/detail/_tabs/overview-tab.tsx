@@ -1,11 +1,11 @@
 "use client";
 
 import * as React from "react";
+import { toast } from "sonner";
 
 import {
   ActivityIcon,
   AlertTriangleIcon,
-  BugIcon,
   CheckIcon,
   ClockIcon,
   CoinsIcon,
@@ -21,24 +21,30 @@ import {
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Progress } from "@/components/ui/progress";
-import { Switch } from "@/components/ui/switch";
+import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import type {
-  AssetInterceptKind,
-  AssetInterceptRule,
-  Finding,
   ModelTokenStat,
   Stats,
   Task,
   TaskConstraint,
   TaskGoal,
   TaskNode,
-  TaskScopeRow,
 } from "@/lib/types";
 
 // 紧凑格式化 token 数（12345 → 12.3k，2000000 → 2M）。
@@ -53,31 +59,6 @@ function cacheHitRate(cacheRead: number, input: number): string {
   if (input <= 0) return "—";
   return Math.round((cacheRead / input) * 100) + "%";
 }
-
-// 测试范围一条的显示值：域名 / 网段 / 公司。
-function scopeValue(row: TaskScopeRow): string {
-  if (row.value) return row.value;
-  if (row.domain) return row.domain;
-  if (row.net) return row.net;
-  if (row.company_id) return row.company_name?.trim() ? row.company_name : `企业 #${row.company_id}`;
-  return "—";
-}
-
-const SCOPE_KIND_LABELS: Record<TaskScopeRow["kind"], string> = {
-  company: "公司",
-  root_domain: "根域名",
-  subdomain: "子域名",
-  ip: "IP",
-  cidr: "网段",
-  icp: "ICP",
-  keyword: "关键词",
-};
-
-const SCOPE_SOURCE_LABELS: Record<TaskScopeRow["source"], string> = {
-  auto: "自动",
-  agent: "Agent",
-  manual: "手动",
-};
 
 function StatCard({
   label,
@@ -107,23 +88,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [task, setTask] = React.useState<Task | null>(null);
   const [stats, setStats] = React.useState<Stats | null>(null);
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
-  const [findings, setFindings] = React.useState<Finding[]>([]);
-  const [coverage, setCoverage] = React.useState<{
-    enabled: boolean;
-    scope_rows: number;
-    denominator: number;
-    tested: number;
-    pct: number | null;
-    by_type: { type: string; total: number; tested: number }[];
-  } | null>(null);
   // 正在重跑的意图 id（含 "__all__" 表示批量），用于禁用按钮 + 转圈。
   const [rerunning, setRerunning] = React.useState<Set<string>>(new Set());
-  // 测试范围列表 + 新增表单状态。
-  const [scope, setScope] = React.useState<TaskScopeRow[]>([]);
-  const [scopeKind, setScopeKind] = React.useState<TaskScopeRow["kind"]>("root_domain");
-  const [scopeValueInput, setScopeValueInput] = React.useState("");
-  const [scopeBusy, setScopeBusy] = React.useState(false);
-  const [scopeErr, setScopeErr] = React.useState("");
   // 按模型的 token 用量（来自常开的 llm_usage 计量账本，逐次精确）。
   const [modelTokens, setModelTokens] = React.useState<ModelTokenStat[]>([]);
   // 目标管理：目标列表 + 新增表单 + 行内编辑状态。
@@ -144,22 +110,27 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [editingConId, setEditingConId] = React.useState<string | null>(null);
   const [editConText, setEditConText] = React.useState("");
   const [editConKind, setEditConKind] = React.useState<TaskConstraint["kind"]>("deny");
+  const [pendingRemoval, setPendingRemoval] = React.useState<
+    | { kind: "goal"; item: TaskGoal }
+    | { kind: "constraint"; item: TaskConstraint }
+    | null
+  >(null);
+  const [removing, setRemoving] = React.useState(false);
+  const [overviewError, setOverviewError] = React.useState("");
+  const [tokensError, setTokensError] = React.useState("");
+  const [goalsLoadError, setGoalsLoadError] = React.useState("");
+  const [constraintsLoadError, setConstraintsLoadError] = React.useState("");
+  const [overviewReloadTick, setOverviewReloadTick] = React.useState(0);
+  const [overviewLoading, setOverviewLoading] = React.useState(true);
+  const [overviewReady, setOverviewReady] = React.useState(false);
 
   const loadTokens = React.useCallback(async () => {
     try {
       const resp = await api.tokensByModel(taskId);
       setModelTokens(resp.models);
-    } catch {
-      // 忽略：无 PG 时接口报错，卡片自然为空
-    }
-  }, [taskId]);
-
-  const loadScope = React.useCallback(async () => {
-    try {
-      const resp = await api.taskScope(taskId);
-      setScope(resp.scope);
-    } catch {
-      // 忽略：无 asset store 时接口 503，范围卡片自然为空
+      setTokensError("");
+    } catch (e) {
+      setTokensError((e as Error).message || "Token 用量读取失败");
     }
   }, [taskId]);
 
@@ -167,8 +138,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     try {
       const resp = await api.taskGoals(taskId);
       setGoals(resp.goals);
-    } catch {
-      // 忽略：瞬时错误，下次轮询重试
+      setGoalsLoadError("");
+    } catch (e) {
+      setGoalsLoadError((e as Error).message || "目标列表读取失败");
     }
   }, [taskId]);
 
@@ -218,11 +190,17 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   };
 
   const removeGoal = async (g: TaskGoal) => {
-    setGoals((prev) => prev.filter((x) => x.id !== g.id));
+    setRemoving(true);
+    setGoalErr("");
     try {
       await api.deleteGoal(taskId, g.id);
-    } catch {
-      await loadGoals(); // 删除失败：重新拉取还原
+      setGoals((prev) => prev.filter((x) => x.id !== g.id));
+      setPendingRemoval(null);
+      toast.success("目标已删除");
+    } catch (e) {
+      setGoalErr(e instanceof Error ? `删除失败：${e.message}` : "删除目标失败");
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -230,8 +208,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     try {
       const resp = await api.taskConstraints(taskId);
       setConstraints(resp.constraints);
-    } catch {
-      // 忽略：瞬时错误，下次轮询重试
+      setConstraintsLoadError("");
+    } catch (e) {
+      setConstraintsLoadError((e as Error).message || "操作约束读取失败");
     }
   }, [taskId]);
 
@@ -280,36 +259,26 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   };
 
   const removeConstraint = async (c: TaskConstraint) => {
-    setConstraints((prev) => prev.filter((x) => x.id !== c.id));
+    setRemoving(true);
+    setConErr("");
     try {
       await api.deleteConstraint(taskId, c.id);
-    } catch {
-      await loadConstraints(); // 删除失败：重新拉取还原
-    }
-  };
-
-  const addScope = async () => {
-    const value = scopeValueInput.trim();
-    if (!value) return;
-    setScopeBusy(true);
-    setScopeErr("");
-    try {
-      await api.addTaskScope(taskId, scopeKind, value);
-      setScopeValueInput("");
-      await loadScope();
+      setConstraints((prev) => prev.filter((x) => x.id !== c.id));
+      setPendingRemoval(null);
+      toast.success("操作约束已删除");
     } catch (e) {
-      setScopeErr(e instanceof Error ? e.message : "添加失败");
+      setConErr(e instanceof Error ? `删除失败：${e.message}` : "删除操作约束失败");
     } finally {
-      setScopeBusy(false);
+      setRemoving(false);
     }
   };
 
-  const removeScope = async (row: TaskScopeRow) => {
-    setScope((prev) => prev.filter((s) => s.id !== row.id));
-    try {
-      await api.deleteTaskScope(taskId, row.id);
-    } catch {
-      await loadScope(); // 删除失败：重新拉取还原
+  const confirmPendingRemoval = async () => {
+    if (!pendingRemoval) return;
+    if (pendingRemoval.kind === "goal") {
+      await removeGoal(pendingRemoval.item);
+    } else {
+      await removeConstraint(pendingRemoval.item);
     }
   };
 
@@ -327,8 +296,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     try {
       await api.rerunIntent(taskId, id);
       setIntents((prev) => prev.map((i) => (i.id === id ? { ...i, state: "open" } : i)));
-    } catch {
-      // 失败忽略：下次轮询仍显示 blocked，用户可再点
+      toast.success("已重新提交该步骤");
+    } catch (e) {
+      toast.error("重跑失败：" + ((e as Error).message || "未知错误"));
     } finally {
       markRerun(id, false);
     }
@@ -340,8 +310,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     try {
       await api.rerunBlocked(taskId);
       setIntents((prev) => prev.map((i) => (i.state === "blocked" ? { ...i, state: "open" } : i)));
-    } catch {
-      // ignore
+      toast.success("已重新提交全部阻塞步骤");
+    } catch (e) {
+      toast.error("批量重跑失败：" + ((e as Error).message || "未知错误"));
     } finally {
       markRerun("__all__", false);
     }
@@ -354,12 +325,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     const load = async () => {
       if (loading) return;
       loading = true;
+      setOverviewLoading(true);
       try {
-        const [taskResp, statsResp, intentsResp, findingsResp] = await Promise.all([
+        const [taskResp, statsResp, intentsResp] = await Promise.all([
           api.task(taskId),
           api.stats(taskId),
           api.intents(taskId),
-          api.findings(taskId),
         ]);
         if (cancelled) return;
         const activeTask = statsResp.active_task;
@@ -377,26 +348,17 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         );
         setStats(statsResp);
         setIntents(intentsResp);
-        setFindings(findingsResp);
-        // coverage is independent + may 503 when no asset store — fetch separately so
-        // its failure never blocks the others.
-        api
-          .taskCoverage(taskId)
-          .then((c) => {
-            if (!cancelled) setCoverage(c);
-          })
-          .catch(() => {
-            // A transient coverage failure is retried by the next poll.
-          });
-      } catch {
-        // transient errors are ignored; the next poll will retry
+        setOverviewError("");
+        setOverviewReady(true);
+      } catch (e) {
+        if (!cancelled) setOverviewError((e as Error).message || "任务总览读取失败");
       } finally {
         loading = false;
+        if (!cancelled) setOverviewLoading(false);
       }
     };
 
     void load();
-    void loadScope();
     void loadTokens();
     void loadGoals();
     void loadConstraints();
@@ -410,12 +372,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints]);
+  }, [taskId, loadTokens, loadGoals, loadConstraints, overviewReloadTick]);
 
   const running = intents.filter((i) => i.state === "running");
   const open = intents.filter((i) => i.state === "open");
   const blocked = intents.filter((i) => i.state === "blocked");
-  const taskFindings = findings.filter((f) => f.task_id === taskId);
   const goalsPct = task?.goals_total ? Math.round(((task.goals_met ?? 0) / task.goals_total) * 100) : 0;
   // token 合计（跨全部模型），用于卡片头部总览。
   const tokenTotals = modelTokens.reduce(
@@ -430,8 +391,75 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 },
   );
 
+  if (!overviewReady) {
+    return (
+      <div className="flex flex-col gap-4" aria-live="polite" aria-busy={overviewLoading}>
+        {overviewError ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+            <span className="text-destructive text-sm">任务总览读取失败：{overviewError}</span>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={overviewLoading}
+              onClick={() => {
+                setOverviewLoading(true);
+                setOverviewReloadTick((n) => n + 1);
+              }}
+            >
+              <RefreshCwIcon className={overviewLoading ? "animate-spin" : ""} /> 重试
+            </Button>
+          </div>
+        ) : null}
+        {overviewLoading ? (
+          <>
+            <Skeleton className="h-28 w-full rounded-xl" />
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Skeleton className="h-36 w-full rounded-xl" />
+              <Skeleton className="h-36 w-full rounded-xl" />
+            </div>
+            <Skeleton className="h-48 w-full rounded-xl" />
+          </>
+        ) : !overviewError ? (
+          <p className="text-muted-foreground text-sm">暂无可展示的任务总览数据。</p>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4">
+      {overviewError && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+          <span className="text-destructive text-sm">总览刷新失败：{overviewError}</span>
+          <Button size="sm" variant="outline" onClick={() => setOverviewReloadTick((n) => n + 1)}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+      {tokensError && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+          <span className="text-destructive text-sm">Token 用量读取失败：{tokensError}</span>
+          <Button size="sm" variant="outline" onClick={() => void loadTokens()}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+      {goalsLoadError && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+          <span className="text-destructive text-sm">目标列表读取失败：{goalsLoadError}</span>
+          <Button size="sm" variant="outline" onClick={() => void loadGoals()}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+      {constraintsLoadError && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+          <span className="text-destructive text-sm">操作约束读取失败：{constraintsLoadError}</span>
+          <Button size="sm" variant="outline" onClick={() => void loadConstraints()}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
       {/* 原始任务描述与目标(创建时填写的),置顶便于随时回看。 */}
       <Card>
         <CardHeader>
@@ -450,8 +478,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </div>
         </CardContent>
       </Card>
-      {/* 目标管理：查看/新增/修改/删除本任务的探索目标。新增与修改会通知规划者并复活任务，
-          删除仅通知规划者（不复活）。目标 = 最终可交付/可核验的结果，不是攻击步骤或侦察动作。 */}
+      {/* 目标管理：查看/新增/修改/删除本任务的执行目标。新增与修改会通知规划者并复活任务，
+          删除仅通知规划者（不复活）。目标 = 最终可交付/可核验的结果。 */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -466,7 +494,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           <div className="flex flex-wrap items-center gap-2">
             <Input
               className="h-7 min-w-56 flex-1 text-sm"
-              placeholder="新增目标，如『拿到管理员账号的越权访问』"
+              placeholder="新增目标，如『整理一份结构清晰的周报』"
               value={goalText}
               onChange={(e) => setGoalText(e.target.value)}
               onKeyDown={(e) => {
@@ -476,7 +504,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             />
             <Input
               className="h-7 w-32 text-sm"
-              placeholder="漏洞类(可选)"
+              placeholder="分类(可选)"
               value={goalVuln}
               onChange={(e) => setGoalVuln(e.target.value)}
               onKeyDown={(e) => {
@@ -508,7 +536,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                     />
                     <Input
                       className="h-7 w-32 text-sm"
-                      placeholder="漏洞类(可选)"
+                      placeholder="分类(可选)"
                       value={editVuln}
                       onChange={(e) => setEditVuln(e.target.value)}
                       onKeyDown={(e) => {
@@ -559,7 +587,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
                       disabled={goalBusy}
-                      onClick={() => void removeGoal(g)}
+                      onClick={() => setPendingRemoval({ kind: "goal", item: g })}
+                      aria-label={`删除目标：${g.text}`}
                     >
                       <Trash2Icon className="size-3.5 text-red-500" />
                     </Button>
@@ -568,19 +597,19 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               )}
             </div>
           ) : (
-            <p className="text-muted-foreground text-sm">暂无目标，添加后规划者会据此派发探索意图并判定达成。</p>
+            <p className="text-muted-foreground text-sm">暂无目标，添加后规划者会据此安排执行步骤并判定达成。</p>
           )}
         </CardContent>
       </Card>
       {/* 操作约束管理：allow=允许 / deny=禁止。约束会在下一轮规划时注入 planner/worker 的系统
-          提示以框定探索边界（注入范围可在 系统设置 里按 planner/worker 开关）。改动不即时打断，
+          提示以框定执行边界（注入范围可在 系统设置 里按 planner/worker 开关）。改动不即时打断，
           下一轮规划自然读到。 */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <ShieldAlertIcon className="size-4 text-amber-500" /> 操作约束
             <span className="text-muted-foreground text-xs font-normal">
-              （框定 planner/worker 的探索边界，共 {constraints.length} 条；改动下一轮规划生效）
+              （框定 planner/worker 的执行边界，共 {constraints.length} 条；改动下一轮规划生效）
             </span>
           </CardTitle>
         </CardHeader>
@@ -597,7 +626,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             </NativeSelect>
             <Input
               className="h-7 min-w-56 flex-1 text-sm"
-              placeholder="一条操作约束，如『仅测当前端口，不扫其他端口』"
+              placeholder="一条操作约束，如『只读取文件，不修改系统配置』"
               value={conText}
               onChange={(e) => setConText(e.target.value)}
               onKeyDown={(e) => {
@@ -685,7 +714,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
                       disabled={conBusy}
-                      onClick={() => void removeConstraint(c)}
+                      onClick={() => setPendingRemoval({ kind: "constraint", item: c })}
+                      aria-label={`删除操作约束：${c.text}`}
                     >
                       <Trash2Icon className="size-3.5 text-red-500" />
                     </Button>
@@ -700,40 +730,6 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           )}
         </CardContent>
       </Card>
-      <TaskInterceptRulesCard taskId={taskId} />
-      {coverage && coverage.enabled && coverage.scope_rows > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <TargetIcon className="size-4 text-emerald-500" /> 资产测试覆盖度
-              <span className="text-muted-foreground text-xs font-normal">（粗估，仅供参考）</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            <div className="flex items-baseline gap-3">
-              <span className="text-2xl font-semibold tabular-nums">
-                {coverage.pct != null ? Math.round(coverage.pct * 100) + "%" : "—"}
-              </span>
-              <span className="text-muted-foreground text-sm">
-                已测 {coverage.tested} / 范围内 {coverage.denominator}
-              </span>
-            </div>
-            {coverage.pct != null && <Progress value={Math.round(coverage.pct * 100)} />}
-            {coverage.by_type.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 text-xs">
-                {coverage.by_type.map((b) => (
-                  <span key={b.type} className="bg-muted rounded px-1.5 py-0.5">
-                    <span className="text-muted-foreground">{b.type}</span>{" "}
-                    <span className="tabular-nums font-medium">
-                      {b.tested}/{b.total}
-                    </span>
-                  </span>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
       {/* LLM Token 用量：按模型分组，数据来自 llm_records（需开启 LLM 录制）。 */}
       <Card>
         <CardHeader>
@@ -802,92 +798,6 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             </>
           ) : (
             <p className="text-muted-foreground text-sm">暂无 LLM 用量（任务尚未产生调用，或记录仍在写入）。</p>
-          )}
-        </CardContent>
-      </Card>
-      {/* 测试范围：覆盖度分母 + 授权边界，可手动增删。 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <ShieldCheckIcon className="size-4 text-emerald-500" /> 测试范围
-            <span className="text-muted-foreground text-xs font-normal">
-              （覆盖度分母 + 授权边界，共 {scope.length} 条）
-            </span>
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          {/* 新增表单 */}
-          <div className="flex flex-wrap items-center gap-2">
-            <NativeSelect
-              size="sm"
-              value={scopeKind}
-              onChange={(e) => setScopeKind(e.target.value as TaskScopeRow["kind"])}
-            >
-              <NativeSelectOption value="root_domain">根域名</NativeSelectOption>
-              <NativeSelectOption value="subdomain">子域名</NativeSelectOption>
-              <NativeSelectOption value="ip">IP</NativeSelectOption>
-              <NativeSelectOption value="cidr">网段</NativeSelectOption>
-              <NativeSelectOption value="icp">ICP</NativeSelectOption>
-              <NativeSelectOption value="keyword">关键词</NativeSelectOption>
-              <NativeSelectOption value="company">公司</NativeSelectOption>
-            </NativeSelect>
-            <Input
-              className="h-7 w-56 text-sm"
-              placeholder={
-                scopeKind === "company"
-                  ? "公司名或 id"
-                  : scopeKind === "ip" || scopeKind === "cidr"
-                    ? "如 10.0.0.1 或 10.0.0.0/24"
-                    : scopeKind === "icp"
-                      ? "如 京ICP备12345678号-1"
-                      : scopeKind === "keyword"
-                        ? "如 企业名称关键词"
-                        : "如 example.com"
-              }
-              value={scopeValueInput}
-              onChange={(e) => setScopeValueInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void addScope();
-              }}
-              disabled={scopeBusy}
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={scopeBusy || !scopeValueInput.trim()}
-              onClick={() => void addScope()}
-            >
-              <PlusIcon className="size-3.5" /> 添加
-            </Button>
-            {scopeErr && <span className="text-xs text-red-500">{scopeErr}</span>}
-          </div>
-          {/* 范围列表 */}
-          {scope.length > 0 ? (
-            <div className="flex flex-col gap-1.5">
-              {scope.map((row) => (
-                <div key={row.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
-                  <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
-                    {SCOPE_KIND_LABELS[row.kind]}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate font-mono text-xs">{scopeValue(row)}</span>
-                  <span className="text-muted-foreground shrink-0 text-xs">{SCOPE_SOURCE_LABELS[row.source]}</span>
-                  {row.task_id.toString() === taskId ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-6 shrink-0 px-1.5"
-                      onClick={() => void removeScope(row)}
-                    >
-                      <Trash2Icon className="size-3.5 text-red-500" />
-                    </Button>
-                  ) : (
-                    <span className="text-muted-foreground shrink-0 text-xs">继承</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-muted-foreground text-sm">暂无测试范围，添加后可作为资产覆盖度的分母。</p>
           )}
         </CardContent>
       </Card>
@@ -964,10 +874,6 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-3 text-sm">
             <div>
-              <div className="text-2xl font-semibold tabular-nums text-red-600">{taskFindings.length}</div>
-              <div className="text-xs text-muted-foreground">确认漏洞</div>
-            </div>
-            <div>
               <div className="text-2xl font-semibold tabular-nums text-blue-600">{running.length}</div>
               <div className="text-xs text-muted-foreground">执行中</div>
             </div>
@@ -979,23 +885,6 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               <div className="text-2xl font-semibold tabular-nums text-red-600">{blocked.length}</div>
               <div className="text-xs text-muted-foreground">被拦意图</div>
             </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <BugIcon className="size-4 text-red-500" /> 最近发现
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-2">
-            {taskFindings.slice(0, 6).map((f) => (
-              <div key={f.id} className="flex items-center gap-2 text-sm">
-                <StatusBadge domain="severity" value={f.severity} dot />
-                <span className="min-w-0 flex-1 truncate">{f.summary}</span>
-              </div>
-            ))}
-            {taskFindings.length === 0 && <p className="text-sm text-muted-foreground">暂无发现</p>}
           </CardContent>
         </Card>
       </div>
@@ -1043,280 +932,45 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         <StatCard label="待领意图" value={open.length} icon={ShieldCheckIcon} sub="frontier 开放" />
-        <StatCard label="确认发现" value={taskFindings.length} icon={BugIcon} sub="本任务" />
         <StatCard label="意图总数" value={intents.length} icon={AlertTriangleIcon} sub="本任务全部意图" />
       </div>
+
+      <AlertDialog
+        open={!!pendingRemoval}
+        onOpenChange={(open) => {
+          if (!open && !removing) setPendingRemoval(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingRemoval?.kind === "goal" ? "删除这个执行目标？" : "删除这条操作约束？"}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2">
+              <span className="block rounded-md border bg-muted/40 px-3 py-2 text-sm text-foreground">
+                {pendingRemoval?.item.text}
+              </span>
+              <span className="block">
+                {pendingRemoval?.kind === "goal"
+                  ? "删除后，该目标不再参与达成判断，后续规划不会继续围绕它执行。此操作不可撤销。"
+                  : "删除后，planner 与 worker 在下一轮规划中将不再受这条允许/禁止边界限制。此操作不可撤销。"}
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={removing}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={removing}
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmPendingRemoval();
+              }}
+            >
+              {removing ? "删除中…" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
-  );
-}
-
-const TASK_RULE_KIND_OPTIONS: { value: AssetInterceptKind; label: string; placeholder: string }[] = [
-  { value: "exact_domain", label: "域名(全等)", placeholder: "example.gov.cn" },
-  { value: "exact_ip", label: "IP(全等)", placeholder: "203.0.113.10" },
-  { value: "exact_url", label: "URL(全等)", placeholder: "https://example.com/login" },
-  { value: "fuzzy_domain", label: "域名(模糊)", placeholder: ".gov.cn" },
-  { value: "fuzzy_ip", label: "IP(模糊)", placeholder: "203.0.113." },
-  { value: "fuzzy_url", label: "URL(模糊)", placeholder: "/admin" },
-  { value: "cidr", label: "CIDR 网段", placeholder: "192.168.0.0/16" },
-];
-
-const TASK_RULE_KIND_LABEL: Record<AssetInterceptKind, string> = Object.fromEntries(
-  TASK_RULE_KIND_OPTIONS.map((o) => [o.value, o.label]),
-) as Record<AssetInterceptKind, string>;
-
-// TaskInterceptRulesCard 在任务详情总览里管理「任务级资产拦截 / 允许规则」：
-// 列表 + 新增 + 行内编辑 + 删除 + 启用开关。规则仅本任务生效，不进全局表。
-function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
-  const [rules, setRules] = React.useState<AssetInterceptRule[]>([]);
-  const [busy, setBusy] = React.useState(false);
-  const [err, setErr] = React.useState("");
-  const [newAction, setNewAction] = React.useState<"block" | "allow">("block");
-  const [newKind, setNewKind] = React.useState<AssetInterceptKind>("fuzzy_domain");
-  const [newPattern, setNewPattern] = React.useState("");
-  const [newNote, setNewNote] = React.useState("");
-  const [editId, setEditId] = React.useState<number | null>(null);
-  const [editAction, setEditAction] = React.useState<"block" | "allow">("block");
-  const [editKind, setEditKind] = React.useState<AssetInterceptKind>("fuzzy_domain");
-  const [editPattern, setEditPattern] = React.useState("");
-  const [editNote, setEditNote] = React.useState("");
-
-  const load = React.useCallback(async () => {
-    try {
-      setRules(await api.taskInterceptRules(taskId));
-    } catch {
-      // 忽略瞬时错误
-    }
-  }, [taskId]);
-
-  React.useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function add() {
-    if (!newPattern.trim()) return;
-    setBusy(true);
-    setErr("");
-    try {
-      await api.createTaskInterceptRule(taskId, {
-        action: newAction,
-        kind: newKind,
-        pattern: newPattern.trim(),
-        note: newNote.trim(),
-        enabled: true,
-      });
-      setNewPattern("");
-      setNewNote("");
-      await load();
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function startEdit(r: AssetInterceptRule) {
-    setEditId(r.id);
-    setEditAction(r.action ?? "block");
-    setEditKind(r.kind);
-    setEditPattern(r.pattern);
-    setEditNote(r.note);
-    setErr("");
-  }
-
-  async function saveEdit(r: AssetInterceptRule) {
-    if (!editPattern.trim()) return;
-    setBusy(true);
-    setErr("");
-    try {
-      await api.updateTaskInterceptRule(taskId, r.id, {
-        action: editAction,
-        kind: editKind,
-        pattern: editPattern.trim(),
-        note: editNote.trim(),
-        enabled: r.enabled,
-      });
-      setEditId(null);
-      await load();
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function remove(r: AssetInterceptRule) {
-    setRules((prev) => prev.filter((x) => x.id !== r.id));
-    try {
-      await api.deleteTaskInterceptRule(taskId, r.id);
-    } catch {
-      await load();
-    }
-  }
-
-  async function toggle(r: AssetInterceptRule) {
-    setRules((prev) => prev.map((x) => (x.id === r.id ? { ...x, enabled: !x.enabled } : x)));
-    try {
-      await api.toggleTaskInterceptRule(taskId, r.id, !r.enabled);
-    } catch {
-      await load();
-    }
-  }
-
-  const placeholder = TASK_RULE_KIND_OPTIONS.find((o) => o.value === newKind)?.placeholder ?? "";
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <ShieldCheckIcon className="size-4 text-sky-500" /> 任务级资产拦截 / 允许
-          <span className="text-muted-foreground text-xs font-normal">
-            （仅本任务生效，不进全局；先拦截后允许，共 {rules.length} 条）
-          </span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        {/* 新增表单 */}
-        <div className="flex flex-wrap items-center gap-2">
-          <NativeSelect size="sm" value={newAction} onChange={(e) => setNewAction(e.target.value as "block" | "allow")}>
-            <NativeSelectOption value="block">拦截</NativeSelectOption>
-            <NativeSelectOption value="allow">允许</NativeSelectOption>
-          </NativeSelect>
-          <NativeSelect size="sm" value={newKind} onChange={(e) => setNewKind(e.target.value as AssetInterceptKind)}>
-            {TASK_RULE_KIND_OPTIONS.map((o) => (
-              <NativeSelectOption key={o.value} value={o.value}>
-                {o.label}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
-          <Input
-            className="h-7 min-w-56 flex-1 text-sm"
-            placeholder={placeholder}
-            value={newPattern}
-            onChange={(e) => setNewPattern(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void add();
-            }}
-            disabled={busy}
-          />
-          <Input
-            className="h-7 w-36 text-sm"
-            placeholder="备注(可选)"
-            value={newNote}
-            onChange={(e) => setNewNote(e.target.value)}
-            disabled={busy}
-          />
-          <Button size="sm" variant="outline" disabled={busy || !newPattern.trim()} onClick={() => void add()}>
-            <PlusIcon className="size-3.5" /> 添加
-          </Button>
-          {err && <span className="text-xs text-red-500">{err}</span>}
-        </div>
-        {/* 规则列表 */}
-        {rules.length > 0 ? (
-          <div className="flex flex-col gap-1.5">
-            {rules.map((r) =>
-              editId === r.id ? (
-                <div key={r.id} className="flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-1.5">
-                  <NativeSelect
-                    size="sm"
-                    value={editAction}
-                    onChange={(e) => setEditAction(e.target.value as "block" | "allow")}
-                  >
-                    <NativeSelectOption value="block">拦截</NativeSelectOption>
-                    <NativeSelectOption value="allow">允许</NativeSelectOption>
-                  </NativeSelect>
-                  <NativeSelect
-                    size="sm"
-                    value={editKind}
-                    onChange={(e) => setEditKind(e.target.value as AssetInterceptKind)}
-                  >
-                    {TASK_RULE_KIND_OPTIONS.map((o) => (
-                      <NativeSelectOption key={o.value} value={o.value}>
-                        {o.label}
-                      </NativeSelectOption>
-                    ))}
-                  </NativeSelect>
-                  <Input
-                    className="h-7 min-w-56 flex-1 text-sm"
-                    value={editPattern}
-                    onChange={(e) => setEditPattern(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void saveEdit(r);
-                      if (e.key === "Escape") setEditId(null);
-                    }}
-                    disabled={busy}
-                    autoFocus
-                  />
-                  <Input
-                    className="h-7 w-36 text-sm"
-                    placeholder="备注(可选)"
-                    value={editNote}
-                    onChange={(e) => setEditNote(e.target.value)}
-                    disabled={busy}
-                  />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 shrink-0 px-1.5"
-                    disabled={busy || !editPattern.trim()}
-                    onClick={() => void saveEdit(r)}
-                  >
-                    <CheckIcon className="size-3.5 text-emerald-500" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 shrink-0 px-1.5"
-                    disabled={busy}
-                    onClick={() => setEditId(null)}
-                  >
-                    <XIcon className="size-3.5" />
-                  </Button>
-                </div>
-              ) : (
-                <div key={r.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
-                  <span
-                    className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
-                      r.action === "allow"
-                        ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                        : "bg-red-500/15 text-red-600 dark:text-red-400"
-                    }`}
-                  >
-                    {r.action === "allow" ? "允许" : "拦截"}
-                  </span>
-                  <span className="text-muted-foreground shrink-0 text-xs">{TASK_RULE_KIND_LABEL[r.kind]}</span>
-                  <code className="bg-muted min-w-0 flex-1 truncate rounded px-1.5 py-0.5 text-xs">{r.pattern}</code>
-                  {r.note && (
-                    <span className="text-muted-foreground max-w-[120px] shrink-0 truncate text-xs">{r.note}</span>
-                  )}
-                  <Switch checked={r.enabled} onCheckedChange={() => void toggle(r)} />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 shrink-0 px-1.5"
-                    disabled={busy}
-                    onClick={() => startEdit(r)}
-                  >
-                    <PencilIcon className="size-3.5" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 shrink-0 px-1.5"
-                    disabled={busy}
-                    onClick={() => void remove(r)}
-                  >
-                    <Trash2Icon className="size-3.5 text-red-500" />
-                  </Button>
-                </div>
-              ),
-            )}
-          </div>
-        ) : (
-          <p className="text-muted-foreground text-sm">
-            暂无任务级规则。「拦截」命中即禁止测试；「允许」为白名单——配置后本任务只允许命中允许规则的资产（未配置则不启用白名单）。
-          </p>
-        )}
-      </CardContent>
-    </Card>
   );
 }

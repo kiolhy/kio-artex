@@ -262,7 +262,9 @@ func firstAudit(audits []*InterceptAudit) any {
 	if err != nil {
 		return nil
 	}
-	return raw
+	// Bind JSON as text so drivers using simple protocol or unknown-type
+	// inference cannot encode []byte as bytea for a jsonb target.
+	return string(raw)
 }
 
 // ListAllIntercepts returns up to limit intercept_pending rows (newest first)

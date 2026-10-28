@@ -2,19 +2,26 @@
 
 import * as React from "react";
 import {
+  ArrowRight,
   CheckIcon,
   ChevronDown,
   ChevronRight,
   CrosshairIcon,
+  ExternalLink,
   Flag,
+  ListTodo,
+  Loader2,
   MessageSquare,
   PaperclipIcon,
+  RotateCw,
   ShieldAlertIcon,
   Terminal,
   UserIcon,
   Wrench,
+  XCircle,
   XIcon,
 } from "lucide-react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Markdown } from "@/components/markdown";
@@ -23,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ApprovalDetail } from "@/components/approval-records";
 import type { Activity, InterceptPending } from "@/lib/types";
+import { emitWorkChanged } from "@/lib/work-events";
 
 // ---- per-agent lane color (planner + work#1/#2/#3 …) ---------------------------
 const workerColors = [
@@ -41,7 +49,7 @@ function workerColor(name: string): string {
 }
 
 const chip = (worker: string) =>
-  "mt-0.5 shrink-0 rounded px-1 text-[9px] font-medium text-white " + workerColor(worker);
+  "mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-xs font-medium text-white " + workerColor(worker);
 
 // useInView latches true when the ref'd element first comes within `rootMargin` of
 // the enclosing scroll viewport. Blocks that always show their full body (user
@@ -82,13 +90,24 @@ type Group =
   | { type: "round"; key: number; label: string }
   | { type: "tool"; key: number; worker: string; use?: Activity; result?: Activity }
   | { type: "msg"; key: number; worker: string; steps: Activity[] }
+  | { type: "work_task"; key: number; step: Activity }
   | { type: "intercept"; key: number; step: Activity };
 
 function groupSteps(steps: Activity[], chat: boolean): Group[] {
   const out: Group[] = [];
   const byToolId = new Map<string, Extract<Group, { type: "tool" }>>();
+  const seenWorkTasks = new Set<number>();
   for (const s of steps) {
     if (s.kind === "usage") continue; // live token-usage marker — not a rendered step
+    if (s.kind === "work_task_created") {
+      const metadata = activityMetadata(s);
+      const taskID = Number(metadata.task_id);
+      if (Number.isFinite(taskID) && taskID > 0 && !seenWorkTasks.has(taskID)) {
+        seenWorkTasks.add(taskID);
+        out.push({ type: "work_task", key: s.seq, step: s });
+      }
+      continue;
+    }
     if (s.kind === "round") {
       out.push({ type: "round", key: s.seq, label: s.summary || "新一轮" }); // planner round boundary
       continue;
@@ -131,6 +150,167 @@ function groupSteps(steps: Activity[], chat: boolean): Group[] {
 
 const kindLabel = (k: string) => (k === "thinking" ? "推理" : k === "result" ? "总结" : "说明");
 
+function activityMetadata(step: Activity): Record<string, unknown> {
+  const raw = step.metadata as unknown;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Older or partial stream payloads may not contain valid JSON.
+    }
+  }
+  return {};
+}
+
+const workAutomationMeta: Record<string, { label: string; className: string }> = {
+  pending: { label: "待执行", className: "border-amber-500/30 bg-amber-500/10 text-amber-700" },
+  running: { label: "执行中", className: "border-blue-500/30 bg-blue-500/10 text-blue-700" },
+  done: { label: "已完成", className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700" },
+  failed: { label: "执行失败", className: "border-red-500/30 bg-red-500/10 text-red-700" },
+  canceled: { label: "已取消", className: "border-border bg-muted text-muted-foreground" },
+};
+
+function WorkTaskCreatedCard({ step }: { step: Activity }) {
+  const metadata = activityMetadata(step);
+  const taskID = Number(metadata.task_id);
+  const [status, setStatus] = React.useState(String(metadata.automation_status || "pending"));
+  const [workTaskURL, setWorkTaskURL] = React.useState(
+    String(metadata.work_task_url || `/work/inbox?task=${taskID}`),
+  );
+  const [artexTaskURL, setArtexTaskURL] = React.useState(String(metadata.artex_task_url || ""));
+  const [cancelAvailable, setCancelAvailable] = React.useState(
+    metadata.cancel_available !== false,
+  );
+  const [busy, setBusy] = React.useState<"cancel" | "retry">();
+  const [error, setError] = React.useState("");
+  const title = String(metadata.title || step.summary.replace(/^已交办个人任务：/, "") || "已交办任务");
+  const meta = workAutomationMeta[status] ?? workAutomationMeta.pending;
+
+  React.useEffect(() => {
+    if (!Number.isFinite(taskID)) return;
+    let cancelled = false;
+    void api
+      .workTask(taskID)
+      .then((task) => {
+        if (cancelled) return;
+        setStatus(task.automation_status);
+        setWorkTaskURL(task.work_task_url || `/work/inbox?task=${taskID}`);
+        setArtexTaskURL(task.artex_task_url || "");
+        setCancelAvailable(task.cancel_available);
+      })
+      .catch(() => {
+        // The structured activity remains usable from its stored metadata when
+        // the task was removed or the refresh is temporarily unavailable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskID]);
+
+  async function cancelTask() {
+    if (!Number.isFinite(taskID) || busy) return;
+    setBusy("cancel");
+    setError("");
+    try {
+      const task = await api.cancelWorkTaskAutomation(taskID);
+      setStatus(task.automation_status);
+      setWorkTaskURL(task.work_task_url || workTaskURL);
+      setArtexTaskURL(task.artex_task_url || "");
+      setCancelAvailable(task.cancel_available);
+      emitWorkChanged();
+      toast.success("已取消自动执行");
+    } catch (cause) {
+      setError((cause as Error).message || "取消自动执行失败");
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
+  async function retryTask() {
+    if (!Number.isFinite(taskID) || busy) return;
+    setBusy("retry");
+    setError("");
+    try {
+      const task = await api.runWorkTask(taskID);
+      setStatus(task.automation_status);
+      setWorkTaskURL(task.work_task_url || workTaskURL);
+      setArtexTaskURL(task.artex_task_url || "");
+      setCancelAvailable(task.cancel_available);
+      emitWorkChanged();
+      toast.success("已重新加入自动执行队列");
+    } catch (cause) {
+      setError((cause as Error).message || "重试失败");
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
+  return (
+    <section className="my-2 rounded-xl border border-primary/20 bg-primary/[0.04] p-3 shadow-sm">
+      <div className="flex min-w-0 items-start gap-2.5">
+        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+          <ListTodo className="size-4 text-primary" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{title}</span>
+            <Badge variant="outline" className={meta.className}>
+              {meta.label}
+            </Badge>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            已自动交办给个人工作台，由主 Agent 拆解并协调多个执行 Agent。
+          </p>
+        </div>
+      </div>
+
+      {error && (
+        <p
+          className="mt-2 rounded-lg border border-destructive/25 bg-destructive/5 px-2.5 py-1.5 text-xs text-destructive"
+          role="alert"
+        >
+          {error}
+        </p>
+      )}
+
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        <Button variant="outline" size="xs" asChild>
+          <Link href={workTaskURL}>
+            查看任务
+            <ArrowRight className="size-3" />
+          </Link>
+        </Button>
+        {artexTaskURL && (
+          <Button variant="outline" size="xs" asChild>
+            <Link href={artexTaskURL}>
+              查看执行
+              <ExternalLink className="size-3" />
+            </Link>
+          </Button>
+        )}
+        {(status === "pending" || status === "running") && cancelAvailable && (
+          <Button variant="ghost" size="xs" disabled={Boolean(busy)} onClick={() => void cancelTask()}>
+            {busy === "cancel" ? <Loader2 className="size-3 animate-spin" /> : <XCircle className="size-3" />}
+            取消自动执行
+          </Button>
+        )}
+        {status === "failed" && (
+          <Button size="xs" disabled={Boolean(busy)} onClick={() => void retryTask()}>
+            {busy === "retry" ? <Loader2 className="size-3 animate-spin" /> : <RotateCw className="size-3" />}
+            重试
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ActivityTime({ ts }: { ts: string }) {
   const date = new Date(ts);
   if (!ts || Number.isNaN(date.getTime())) return null;
@@ -138,7 +318,7 @@ function ActivityTime({ ts }: { ts: string }) {
     <time
       dateTime={date.toISOString()}
       title={date.toLocaleString("zh-CN")}
-      className="text-[10px] text-muted-foreground tabular-nums"
+      className="text-xs text-muted-foreground tabular-nums"
       suppressHydrationWarning
     >
       {date.toLocaleString("zh-CN", {
@@ -283,7 +463,7 @@ function InterceptCard({
           <Badge variant="outline">历史记录 · 只读</Badge>
         ) : decided ? (
           <span className={
-            "shrink-0 rounded px-2 py-0.5 text-[11px] font-medium " +
+            "shrink-0 rounded px-2 py-0.5 text-xs font-medium " +
             (decided === "allowed"
               ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
               : decided === "timeout"
@@ -365,6 +545,8 @@ function ToolBlock({
   const [open, setOpen] = React.useState(focused);
   const targetRef = React.useRef<HTMLElement>(null);
   const [detail, setDetail] = React.useState<string | null>(null);
+  const [detailError, setDetailError] = React.useState("");
+  const [retryNonce, setRetryNonce] = React.useState(0);
   // what we last loaded, keyed by the underlying step seqs. When the tool result
   // arrives after we expanded mid-run (command only), this key changes and the
   // effect below re-fetches — so the output shows up instead of being cached out.
@@ -390,15 +572,13 @@ function ToolBlock({
   React.useEffect(() => {
     if (!open || loadedKey.current === detailKey) return;
     let live = true;
+    setDetail(null);
+    setDetailError("");
     const segs: { label: string; seq: number }[] = [];
     if (use) segs.push({ label: "命令", seq: use.seq });
     if (result) segs.push({ label: "输出" + (result.is_error ? " ✕" : " ✓"), seq: result.seq });
     void Promise.all(
-      segs.map((x) =>
-        getDetail(x.seq)
-          .then((d) => d || "（空）")
-          .catch(() => "（加载失败）"),
-      ),
+      segs.map((x) => getDetail(x.seq).then((d) => d || "（空）")),
     ).then((parts) => {
       if (!live) return;
       setDetail(
@@ -407,11 +587,14 @@ function ToolBlock({
           .join("\n\n"),
       );
       loadedKey.current = detailKey;
+    }).catch((error) => {
+      if (!live) return;
+      setDetailError((error as Error).message || "工具命令或输出加载失败");
     });
     return () => {
       live = false;
     };
-  }, [open, detailKey, use, result, getDetail, toolName]);
+  }, [open, detailKey, use, result, getDetail, toolName, retryNonce]);
 
   const scrolledRef = React.useRef(false);
   React.useEffect(() => {
@@ -471,9 +654,21 @@ function ToolBlock({
         <span className={"ml-auto shrink-0 font-medium " + statusTone}>{statusText}</span>
       </button>
       {open && (
-        <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed">
-          {detail ?? "加载中…"}
-        </pre>
+        detailError ? (
+          <div
+            className="ml-7 mb-1 flex flex-wrap items-center gap-2 rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive"
+            role="alert"
+          >
+            <span className="min-w-0 flex-1">详情加载失败：{detailError}</span>
+            <Button variant="outline" size="sm" onClick={() => setRetryNonce((value) => value + 1)}>
+              重试
+            </Button>
+          </div>
+        ) : (
+          <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-xs leading-relaxed">
+            {detail ?? "加载中…"}
+          </pre>
+        )
       )}
     </section>
   );
@@ -492,6 +687,8 @@ function MessageBlock({
 }) {
   const [open, setOpen] = React.useState(false);
   const [detail, setDetail] = React.useState<string | null>(null);
+  const [detailError, setDetailError] = React.useState("");
+  const [retryNonce, setRetryNonce] = React.useState(0);
   // like ToolBlock: keyed by the group's step seqs so streamed steps arriving
   // after an early expand re-fetch instead of being cached out.
   const loadedKey = React.useRef<string | null>(null);
@@ -506,21 +703,24 @@ function MessageBlock({
   React.useEffect(() => {
     if (!open || loadedKey.current === detailKey) return;
     let live = true;
+    setDetail(null);
+    setDetailError("");
     void Promise.all(
       group.steps.map((s) =>
-        getDetail(s.seq)
-          .then((d) => d || s.summary)
-          .catch(() => s.summary),
+        getDetail(s.seq).then((d) => d || s.summary),
       ),
     ).then((parts) => {
       if (!live) return;
       setDetail(group.steps.map((s, i) => `【${kindLabel(s.kind)}】\n${parts[i]}`).join("\n\n"));
       loadedKey.current = detailKey;
+    }).catch((error) => {
+      if (!live) return;
+      setDetailError((error as Error).message || "消息详情加载失败");
     });
     return () => {
       live = false;
     };
-  }, [open, detailKey, group.steps, getDetail]);
+  }, [open, detailKey, group.steps, getDetail, retryNonce]);
 
   function toggle() {
     setOpen((o) => !o);
@@ -536,13 +736,25 @@ function MessageBlock({
         {showWorker && <span className={chip(group.worker)}>{group.worker}</span>}
         <span className={"min-w-0 flex-1 truncate " + tone}>
           {body}
-          {hasThinking && <span className="ml-1 text-[10px] text-muted-foreground">· 含推理</span>}
+          {hasThinking && <span className="ml-1 text-xs text-muted-foreground">· 含推理</span>}
         </span>
       </button>
       {open && (
-        <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed">
-          {detail ?? "加载中…"}
-        </pre>
+        detailError ? (
+          <div
+            className="ml-7 mb-1 flex flex-wrap items-center gap-2 rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive"
+            role="alert"
+          >
+            <span className="min-w-0 flex-1">详情加载失败：{detailError}</span>
+            <Button variant="outline" size="sm" onClick={() => setRetryNonce((value) => value + 1)}>
+              重试
+            </Button>
+          </div>
+        ) : (
+          <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-xs leading-relaxed">
+            {detail ?? "加载中…"}
+          </pre>
+        )
       )}
     </div>
   );
@@ -585,21 +797,24 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
   // Optimistic echoes carry their detail inline; persisted rows lazy-load it on scroll.
   const inline = step.detail && step.detail.length > 0 ? step.detail : null;
   const [full, setFull] = React.useState<string | null>(inline);
+  const [loadError, setLoadError] = React.useState("");
+  const [retryNonce, setRetryNonce] = React.useState(0);
   React.useEffect(() => {
     if (inline) return; // already have the body (optimistic echo)
     if (!inView) return; // fetch the full message only when the bubble nears view
     let live = true;
+    setLoadError("");
     getDetail(step.seq)
       .then((d) => {
         if (live) setFull(d || step.summary);
       })
-      .catch(() => {
-        if (live) setFull(step.summary);
+      .catch((error) => {
+        if (live) setLoadError((error as Error).message || "完整消息加载失败");
       });
     return () => {
       live = false;
     };
-  }, [inView, step.seq, getDetail, step.summary, inline]);
+  }, [inView, step.seq, getDetail, step.summary, inline, retryNonce]);
   const { text, attachments } = parseUserBody(full ?? step.summary);
   return (
     <div ref={ref} className="mt-3 mb-2 flex min-w-0 justify-end gap-2">
@@ -624,6 +839,14 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
             {text}
           </div>
         )}
+        {loadError && (
+          <div className="flex flex-wrap items-center justify-end gap-1.5 text-xs text-destructive" role="alert">
+            <span>完整消息加载失败：{loadError}</span>
+            <Button variant="ghost" size="sm" className="h-7" onClick={() => setRetryNonce((value) => value + 1)}>
+              重试
+            </Button>
+          </div>
+        )}
         <ActivityTime ts={step.ts} />
       </div>
       <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10">
@@ -639,20 +862,23 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
 function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: number) => Promise<string> }) {
   const [ref, inView] = useInView();
   const [full, setFull] = React.useState<string | null>(null);
+  const [loadError, setLoadError] = React.useState("");
+  const [retryNonce, setRetryNonce] = React.useState(0);
   React.useEffect(() => {
     if (!inView) return; // fetch the full answer only when it nears view
     let live = true;
+    setLoadError("");
     getDetail(step.seq)
       .then((d) => {
         if (live) setFull(d || step.summary);
       })
-      .catch(() => {
-        if (live) setFull(step.summary);
+      .catch((error) => {
+        if (live) setLoadError((error as Error).message || "完整回复加载失败");
       });
     return () => {
       live = false;
     };
-  }, [inView, step.seq, getDetail, step.summary]);
+  }, [inView, step.seq, getDetail, step.summary, retryNonce]);
   return (
     <div ref={ref} className="mb-2 mt-1 flex min-w-0 flex-col gap-1">
       <div
@@ -667,6 +893,14 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
           <Markdown text={full ?? step.summary} />
         )}
       </div>
+      {loadError && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-destructive" role="alert">
+          <span>完整回复加载失败：{loadError}</span>
+          <Button variant="ghost" size="sm" className="h-7" onClick={() => setRetryNonce((value) => value + 1)}>
+            重试
+          </Button>
+        </div>
+      )}
       <ActivityTime ts={step.ts} />
     </div>
   );
@@ -700,7 +934,7 @@ function ExecView({
     <div className="flex flex-col">
       {groupSteps(activity, !!chat).map((g) =>
         g.type === "round" ? (
-          <div key={"r" + g.key} className="my-2 flex items-center gap-2 text-[10px] font-medium text-muted-foreground">
+          <div key={"r" + g.key} className="my-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
             <span className="h-px flex-1 bg-border" />
             {g.label}
             <span className="h-px flex-1 bg-border" />
@@ -719,6 +953,8 @@ function ExecView({
           />
         ) : g.type === "intercept" ? (
           <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
+        ) : g.type === "work_task" ? (
+          <WorkTaskCreatedCard key={"wt" + g.key} step={g.step} />
         ) : (
           <MessageBlock key={"m" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
         ),

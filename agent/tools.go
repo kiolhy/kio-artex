@@ -524,6 +524,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	if t.as != nil && t.ts != nil && t.taskID > 0 {
 		{
 			m := map[string]any{}
+			// Scope is task context, not merely a coverage metric. Keep it even
+			// when coverage calculation is disabled so planners can still see
+			// company/domain/network boundaries and keywords attached to the task.
+			m["scope"] = t.taskScopeOverview()
 			if !t.coverageDisabled {
 				if cov, err := t.as.TaskCoverageWithSources(t.taskID); err == nil {
 					m["denominator"] = cov.Denominator
@@ -547,6 +551,99 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				out["coverage"] = m
 			}
 		}
+	}
+	return out
+}
+
+// taskScopeOverview expands the task's own and directly inherited scope rows.
+// Company rows include their full company_scope and keyword list so a planner
+// does not have to make an extra round-trip before understanding the target.
+func (t *ToolSet) taskScopeOverview() []map[string]any {
+	if t.as == nil || t.taskID <= 0 {
+		return []map[string]any{}
+	}
+	scopes, err := t.as.ListTaskScopeWithSources(t.taskID)
+	if err != nil {
+		return []map[string]any{}
+	}
+	out := make([]map[string]any, 0, len(scopes))
+	for _, scope := range scopes {
+		item := map[string]any{
+			"id":      scope.ID,
+			"task_id": scope.TaskID,
+			"kind":    scope.Kind,
+			"source":  scope.Source,
+		}
+		if scope.CompanyID != nil {
+			item["company_id"] = *scope.CompanyID
+		}
+		if scope.CompanyName != "" {
+			item["company_name"] = scope.CompanyName
+		}
+		if scope.Domain != "" {
+			item["domain"] = scope.Domain
+		}
+		if scope.Net != "" {
+			item["net"] = scope.Net
+		}
+		if scope.Value != "" {
+			item["value"] = scope.Value
+		}
+		if scope.Reason != "" {
+			item["reason"] = scope.Reason
+		}
+		if scope.Kind == "company" && scope.CompanyID != nil && t.cs != nil {
+			companyScope := []map[string]any{}
+			companyKeywords := []string{}
+			if rules, err := t.cs.GetScope(*scope.CompanyID); err == nil {
+				companyScope = make([]map[string]any, 0, len(rules))
+				for _, rule := range rules {
+					expanded := map[string]any{
+						"id":         rule.ID,
+						"company_id": rule.CompanyID,
+						"kind":       rule.Kind,
+					}
+					if rule.Domain != "" {
+						expanded["domain"] = rule.Domain
+					}
+					if rule.Net != "" {
+						expanded["net"] = rule.Net
+					}
+					if rule.Raw != "" {
+						expanded["raw"] = rule.Raw
+						// value is the human-readable rule the user entered. The
+						// normalized domain/net/value columns remain available
+						// separately for matching and deduplication.
+						expanded["value"] = rule.Raw
+					} else {
+						switch {
+						case rule.Value != "":
+							expanded["value"] = rule.Value
+						case rule.Domain != "":
+							expanded["value"] = rule.Domain
+						case rule.Net != "":
+							expanded["value"] = rule.Net
+						}
+					}
+					if rule.Reason != "" {
+						expanded["reason"] = rule.Reason
+					}
+					companyScope = append(companyScope, expanded)
+					if rule.Kind == "keyword" {
+						keyword := rule.Raw
+						if keyword == "" {
+							keyword = rule.Value
+						}
+						if keyword != "" {
+							companyKeywords = append(companyKeywords, keyword)
+						}
+					}
+				}
+			}
+			item["company_scope"] = companyScope
+			item["company_keywords"] = companyKeywords
+		}
+		out = append(out, item)
 	}
 	return out
 }

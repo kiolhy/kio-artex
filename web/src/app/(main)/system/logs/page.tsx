@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { AlertCircleIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { sseUrl } from "@/lib/api";
@@ -12,10 +13,10 @@ import { cn } from "@/lib/utils";
 const MOCK_LOGS: LogLine[] = [
   { seq: 1, ts: "2026-07-26T03:55:00Z", level: "info", tag: "engine", text: "ARTEX v0.1.0 backend listening on :8787 (workers=3)" },
   { seq: 2, ts: "2026-07-26T03:55:01Z", level: "info", tag: "config", text: "LLM configured from DB: anthropic / claude-opus-4-8" },
-  { seq: 3, ts: "2026-07-26T03:56:10Z", level: "info", tag: "planner", text: "task t-acme-web: 第 3 轮规划，生成意图 i-4" },
-  { seq: 4, ts: "2026-07-26T03:57:00Z", level: "warn", tag: "guard", text: "block bash: 目标越界 out.evil.example 不在 scope 内" },
-  { seq: 5, ts: "2026-07-26T03:57:30Z", level: "info", tag: "work#1", text: "report_finding: Default Credentials (high) 已落库" },
-  { seq: 6, ts: "2026-07-26T03:58:20Z", level: "error", tag: "work#3", text: "intercept: mysqldump 命中破坏性规则，等待人工审批" },
+  { seq: 3, ts: "2026-07-26T03:56:10Z", level: "info", tag: "planner", text: "task #12: 第 3 轮规划，生成执行意图 i-4" },
+  { seq: 4, ts: "2026-07-26T03:57:00Z", level: "warn", tag: "policy", text: "block bash: 操作超出当前任务允许范围" },
+  { seq: 5, ts: "2026-07-26T03:57:30Z", level: "info", tag: "work#1", text: "summary: 今日工作汇总已生成并写入通知" },
+  { seq: 6, ts: "2026-07-26T03:58:20Z", level: "error", tag: "work#3", text: "approval: 高风险文件操作等待人工确认" },
 ];
 
 const levelTone: Record<LogLine["level"], string> = {
@@ -42,7 +43,12 @@ export default function LogsPage() {
   const [level, setLevel] = React.useState<"all" | LogLine["level"]>("all");
   const [paused, setPaused] = React.useState(false);
   const [loadingHistory, setLoadingHistory] = React.useState(false);
+  const [historyError, setHistoryError] = React.useState("");
   const [hasMore, setHasMore] = React.useState(false);
+  const [connection, setConnection] = React.useState<"connecting" | "connected" | "disconnected">(
+    MOCK ? "connected" : "connecting",
+  );
+  const [streamKey, setStreamKey] = React.useState(0);
   const bottom = React.useRef<HTMLDivElement>(null);
   const stick = React.useRef(true);
   const pausedRef = React.useRef(false);
@@ -62,10 +68,14 @@ export default function LogsPage() {
   React.useEffect(() => {
     if (MOCK) {
       setLines(MOCK_LOGS);
+      setConnection("connected");
       return;
     }
+    setConnection("connecting");
     const es = new EventSource(sseUrl("/api/logs/stream?since=0"));
+    es.onopen = () => setConnection("connected");
     es.onmessage = (e) => {
+      setConnection("connected");
       if (pausedRef.current) return;
       try {
         const l = JSON.parse(e.data) as LogLine;
@@ -74,8 +84,9 @@ export default function LogsPage() {
         /* ignore malformed frame */
       }
     };
+    es.onerror = () => setConnection("disconnected");
     return () => es.close();
-  }, []);
+  }, [streamKey]);
 
   // Mark "has more" once we have any db_id in view.
   React.useEffect(() => {
@@ -85,10 +96,13 @@ export default function LogsPage() {
   async function loadOlderHistory() {
     if (loadingHistory) return;
     setLoadingHistory(true);
+    setHistoryError("");
     try {
       const params = minDbId > 0 ? `?before=${minDbId}&limit=200` : `?limit=200`;
       const res = await fetch(`/api/logs/history${params}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        throw new Error(`读取历史日志失败（HTTP ${res.status}）`);
+      }
       const data = await res.json() as { items: LogLine[]; has_more: boolean };
       if (data.items?.length) {
         // Assign synthetic seq numbers below current minimum to keep dedup working.
@@ -111,6 +125,8 @@ export default function LogsPage() {
         });
       }
       setHasMore(data.has_more ?? false);
+    } catch (e) {
+      setHistoryError((e as Error).message || "读取历史日志失败");
     } finally {
       setLoadingHistory(false);
     }
@@ -143,7 +159,9 @@ export default function LogsPage() {
     <div className="flex flex-1 flex-col gap-3">
       <div>
         <h1 className="text-xl font-semibold tracking-tight">系统日志</h1>
-        <p className="text-muted-foreground text-sm">后端实时日志流(planner / worker / 数据库 / 流量 …)</p>
+        <p className="text-muted-foreground text-sm">
+          后端实时日志流（Agent / 规划器 / Worker / 数据库 / 通知）
+        </p>
       </div>
       <div className="flex flex-1 flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
@@ -177,12 +195,56 @@ export default function LogsPage() {
           <Button size="sm" variant="outline" className="h-8" onClick={() => setLines([])}>
             清空
           </Button>
+          <div
+            className={cn(
+              "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs",
+              connection === "connected" && "border-emerald-500/40 text-emerald-700",
+              connection === "connecting" && "border-sky-500/40 text-sky-700",
+              connection === "disconnected" && "border-destructive/40 text-destructive",
+            )}
+            role="status"
+            aria-live="polite"
+          >
+            {connection === "connecting" && <Loader2Icon className="size-3.5 animate-spin" />}
+            {connection === "connected" && (
+              <span className="size-2 rounded-full bg-emerald-500" aria-hidden="true" />
+            )}
+            {connection === "disconnected" && <AlertCircleIcon className="size-3.5" />}
+            {connection === "connected"
+              ? "已连接"
+              : connection === "connecting"
+                ? "连接中"
+                : "连接已断开"}
+          </div>
+          {connection === "disconnected" && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8"
+              onClick={() => {
+                setConnection("connecting");
+                setStreamKey((v) => v + 1);
+              }}
+            >
+              <RefreshCwIcon /> 重新连接
+            </Button>
+          )}
           <span className="ml-auto text-xs text-muted-foreground">
             {counts.total} 行 ·{" "}
             <span className="text-amber-600 dark:text-amber-400">{counts.warn} 警告</span> ·{" "}
             <span className="text-red-600 dark:text-red-400">{counts.error} 错误</span>
           </span>
         </div>
+
+        {historyError && (
+          <div className="border-destructive/40 bg-destructive/5 flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2">
+            <AlertCircleIcon className="text-destructive size-4 shrink-0" />
+            <p className="min-w-0 flex-1 text-sm">{historyError}</p>
+            <Button size="sm" variant="outline" onClick={() => void loadOlderHistory()}>
+              <RefreshCwIcon /> 重试
+            </Button>
+          </div>
+        )}
 
         <div
           onScroll={(e) => {
@@ -205,7 +267,9 @@ export default function LogsPage() {
             </div>
           )}
           {filtered.length === 0 ? (
-            <p className="py-10 text-center text-muted-foreground">暂无日志。</p>
+            <p className="py-10 text-center text-muted-foreground">
+              {connection === "disconnected" ? "日志流已断开，请重新连接。" : "尚未收到日志。"}
+            </p>
           ) : (
             filtered.map((l) => {
               const body =
@@ -217,7 +281,7 @@ export default function LogsPage() {
                   <span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", levelDot[l.level])} />
                   <span className="shrink-0 tabular-nums text-muted-foreground">{fmtTime(l.ts)}</span>
                   {l.tag && (
-                    <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-foreground/70">{l.tag}</span>
+                    <span className="shrink-0 rounded bg-muted px-1 text-xs text-foreground/70">{l.tag}</span>
                   )}
                   <span className={cn("min-w-0 whitespace-pre-wrap break-words", levelTone[l.level])}>{body}</span>
                 </div>

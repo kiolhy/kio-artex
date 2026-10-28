@@ -23,8 +23,10 @@ const (
 
 // 事件类型，对应 notification_events.kind。
 const (
-	EventFindingCreated       = "finding_created"
-	EventFindingStatusChanged = "finding_status_changed"
+	EventFindingCreated          = "finding_created"
+	EventFindingStatusChanged    = "finding_status_changed"
+	EventWorkTaskReminderDue     = "work_task_reminder_due"
+	EventWorkTaskReminderOverdue = "work_task_reminder_overdue"
 )
 
 // InitKind 是 config 里为空的 kind 的兜底值。

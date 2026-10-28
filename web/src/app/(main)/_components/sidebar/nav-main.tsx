@@ -4,10 +4,9 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { ChevronRight, MailIcon, PlusCircleIcon } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { api } from "@/lib/api";
 
-import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   DropdownMenu,
@@ -74,7 +73,7 @@ interface NavCollapsibleItemProps {
 
 function CollapsedIconFallback({ title }: { title: string }) {
   return (
-    <span className="flex size-4 shrink-0 items-center justify-center rounded-xs font-medium text-[10px] outline">
+    <span className="flex size-5 shrink-0 items-center justify-center rounded-xs font-medium text-xs outline">
       {title.slice(0, 1)}
     </span>
   );
@@ -85,6 +84,8 @@ function hasSubItems(item: NavMainItem): item is NavMainParentItem {
 }
 
 export function NavMain({ items }: NavMainProps) {
+  const { state, isMobile } = useSidebar();
+  const [openGroups, setOpenGroups] = React.useState<Record<number, boolean>>({});
   const rawPath = usePathname();
   // 路由段含中文，pathname 可能是百分号编码，解码后再与导航 url 比较，保证高亮命中。
   const path = (() => {
@@ -110,31 +111,61 @@ export function NavMain({ items }: NavMainProps) {
   const isSubmenuOpen = (item: NavMainParentItem) => {
     return item.subItems.some((sub) => path.startsWith(sub.url));
   };
+  const isCollapsedDesktop = state === "collapsed" && !isMobile;
 
   return (
     <>
-      {items.map((group) => (
-        <SidebarGroup key={group.id}>
-          {group.label && (
-            <SidebarGroupLabel className="group-data-[collapsible=icon]:pointer-events-none">
-              {group.label}
-            </SidebarGroupLabel>
-          )}
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {group.items.map((item) => (
-                <NavItem
-                  key={item.id}
-                  item={item}
-                  isItemActive={isItemActive}
-                  isSubItemActive={isSubItemActive}
-                  isSubmenuOpen={isSubmenuOpen}
-                />
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-      ))}
+      {items.map((group) => {
+        const active = group.items.some(isItemActive);
+        const open =
+          isCollapsedDesktop ||
+          !group.collapsedByDefault ||
+          Boolean(openGroups[group.id]) ||
+          active;
+
+        return (
+          <SidebarGroup key={group.id}>
+            {group.label && (
+              group.collapsedByDefault ? (
+                <SidebarGroupLabel asChild className="group-data-[collapsible=icon]:pointer-events-none">
+                  <button
+                    type="button"
+                    className="w-full justify-between hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                    aria-expanded={open}
+                    onClick={() =>
+                      setOpenGroups((groups) => ({ ...groups, [group.id]: !open }))
+                    }
+                  >
+                    <span>{group.label}</span>
+                    <ChevronRight
+                      className={cn("size-3.5 transition-transform", open && "rotate-90")}
+                    />
+                  </button>
+                </SidebarGroupLabel>
+              ) : (
+                <SidebarGroupLabel className="group-data-[collapsible=icon]:pointer-events-none">
+                  {group.label}
+                </SidebarGroupLabel>
+              )
+            )}
+            {open && (
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {group.items.map((item) => (
+                    <NavItem
+                      key={item.id}
+                      item={item}
+                      isItemActive={isItemActive}
+                      isSubItemActive={isSubItemActive}
+                      isSubmenuOpen={isSubmenuOpen}
+                    />
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            )}
+          </SidebarGroup>
+        );
+      })}
     </>
   );
 }
@@ -173,13 +204,13 @@ function InterceptPendingBadge() {
         if (live) setCount(list.length);
       } catch { /* ignore */ }
     }
-    poll();
+    void poll();
     const t = setInterval(poll, 5000);
     return () => { live = false; clearInterval(t); };
   }, []);
   if (count === 0) return null;
   return (
-    <SidebarMenuBadge className="flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white shadow-sm ring-1 ring-amber-400/40">
+    <SidebarMenuBadge className="flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500 px-1.5 font-semibold text-white text-xs leading-none shadow-sm ring-1 ring-amber-400/40">
       {count > 99 ? "99+" : count}
     </SidebarMenuBadge>
   );

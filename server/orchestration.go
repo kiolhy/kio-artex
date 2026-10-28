@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -495,10 +496,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedWorkerReadbackRebind()  // 修复旧迁移误删：把 search_all_worker_traces/get_worker_trace/node_detail 补绑回 worker(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()             // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
-	s.reseedMainAgentPrompt()         // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.reseedPlannerPrompt()           // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
-	s.reseedWorkerPrompt()            // worker 提示词:加否定结论证据门槛(一次性)
+	s.migrateLegacyBuiltinPrompts()   // 只把仍为已知安全版默认的提示词迁到个人工作台默认，自定义内容不动
 	s.seedReporterAgent()             // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
@@ -563,125 +561,107 @@ func (s *Server) unbindGoalMetDefault() {
 	_ = s.m.pg.SetSetting(flag, "true")
 }
 
-// reseedGoalsPrompt 把 goals 目标拆解器的提示词刷成【当前代码默认】——因为默认正文新增了
-// 「先抽操作约束(set_constraints)再拆目标」这一步,而 SeedPromptIfEmpty 首插入only,旧库
-// 已有的 version 1 收不到这步。这里用版本管理【追加一个新版本】并切过去(ResetPromptToDefault),
-// 旧的版本仍保留在历史里,用户若自定义过可从版本记录找回。settings flag 守卫 → 只做一次;
-// 以后默认再变就 bump 这个 flag。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。
-func (s *Server) reseedGoalsPrompt() {
-	const flag = "goals_prompt_constraint_step_v1"
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("goals")
-	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
-	}
-	tmpl := agent.BuiltinPromptSeeds()["goals"]
-	if tmpl == "" {
-		return
-	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
-		return
-	}
-	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] goals 提示词重刷为新默认失败: %v", err)
-		return
-	}
-	log.Printf("[prompts] goals 提示词已追加新默认版本(加入抽操作约束步,一次性)")
+var legacyBuiltinPromptHashes = map[string]map[string]bool{
+	"goals": {
+		"72a7a0159443b41dde29dfba8a3de6a2c8a15b273935495a7b88561fa708aa68": true,
+	},
+	"mainagent": {
+		"12bb69ee0886c4fb9beb936d882021a91104860f1da69a5e3eda3d9e345cd399": true,
+	},
+	"planner": {
+		"14e163f4a44da9fee20a214048a607adc3659b2025275569eb512532ca8c15d5": true,
+	},
+	"worker": {
+		"80fbb1c610dd57f266c20b9145793339eee540b809f6db8f5336261b45879f08": true,
+	},
+	"auto": {
+		"b2a71b82243607337b19f0642317fed88c144d536412d80eaaf90807f2905a1d": true,
+	},
 }
 
-// reseedMainAgentPrompt 把 mainagent 提示词刷成【当前代码默认】——默认正文新增了「目标全部
-// 达成后 add_intent 直投意图时,反问人是否登记为正式目标」这段引导,而 SeedPromptIfEmpty 首插入
-// only,旧库已有版本收不到。用版本管理【追加一个新版本】并切过去(ResetPromptToDefault),旧版本仍
-// 保留在历史里,用户若自定义过可从版本记录找回。settings flag 守卫 → 只做一次。全新库无需处理
-// (SeedPromptIfEmpty 已 seed 最新默认)。与 reseedGoalsPrompt 完全同构。
-func (s *Server) reseedMainAgentPrompt() {
-	const flag = "mainagent_prompt_goalless_intent_v1"
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("mainagent")
-	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
-	}
-	tmpl := agent.BuiltinPromptSeeds()["mainagent"]
-	if tmpl == "" {
-		return
-	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
-		return
-	}
-	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] mainagent 提示词重刷为新默认失败: %v", err)
-		return
-	}
-	log.Printf("[prompts] mainagent 提示词已追加新默认版本(加入目标达成后反问建目标,一次性)")
+// These markers identify the shipped security-focused defaults even when a
+// migrated database contains a minor punctuation, whitespace, or template-var
+// edit that changes the exact hash. They are deliberately paired with the
+// expected built-in role so a personal prompt that merely mentions security
+// terminology is not replaced.
+var legacyBuiltinSecurityPromptMarkers = map[string]string{
+	"goals":     "你是渗透测试目标分解器",
+	"mainagent": `你是一个授权渗透测试系统的"主 agent"`,
+	"planner":   `你是一个网络安全平台授权渗透测试系统的"规划者"`,
+	"worker":    `你是一个网络安全平台授权渗透测试系统的"执行者"`,
+	"auto":      "你是 **Auto**，这个渗透测试平台的「操作助手」",
 }
 
-// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文做了精简重构,并把「克制」降级为
-// 仅去重、新增「深度优先于覆盖度」「硬底线:目标未达成且无在跑意图必须产出」、给否定结论复核加上界。
-// 每次默认有实质变更就 bump 下面的 flag(当前 v2)让存量旧库再刷一次。SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理
-// 【追加一个新版本】并切过去(ResetPromptToDefault),旧版本仍保留在历史里,用户若自定义过可从版本记录
-// 找回。settings flag 守卫 → 只做一次。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。与
-// reseedGoalsPrompt 完全同构。
-func (s *Server) reseedPlannerPrompt() {
-	const flag = "planner_prompt_compact_realistic_v2"
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("planner")
-	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
-	}
-	tmpl := agent.BuiltinPromptSeeds()["planner"]
-	if tmpl == "" {
-		return
-	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
-		return
-	}
-	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] planner 提示词重刷为新默认失败: %v", err)
-		return
-	}
-	log.Printf("[prompts] planner 提示词已追加新默认版本(精简重构+克制降级去重+深度优先+否定复核上界,一次性)")
+func normalizedPromptHash(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	sum := sha256.Sum256([]byte(strings.TrimSpace(text)))
+	return fmt.Sprintf("%x", sum)
 }
 
-// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文 record_fact 段删掉了「否定类结论
-// 写观察+试探性读法」整句、并把 confidence(observed/inferred)与「是否穷尽本意图手段」解耦(这些易误导规划者),
-// 同时把 facts 数组分条收紧为「彼此完全独立、无法归并」的极少数例外。bump flag 至 v3 让存量旧库再刷一次。
-// SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。
-// settings flag 守卫 → 只做一次。全新库无需处理。与 reseedGoalsPrompt 完全同构。
-func (s *Server) reseedWorkerPrompt() {
-	const flag = "worker_prompt_compact_v4"
+func isLegacyBuiltinSecurityPrompt(key, text string) bool {
+	if legacyBuiltinPromptHashes[key][normalizedPromptHash(text)] {
+		return true
+	}
+	marker := legacyBuiltinSecurityPromptMarkers[key]
+	if marker == "" {
+		return false
+	}
+	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	return strings.Contains(normalized, marker)
+}
+
+// migrateLegacyBuiltinPrompts upgrades only prompt bodies that still match a
+// known shipped security-workflow version. A custom personal prompt is never
+// replaced. v2 also catches minor edits to the old templates that changed the
+// exact hash and were incorrectly preserved by the v1 migration.
+func (s *Server) migrateLegacyBuiltinPrompts() {
+	for _, key := range []string{"goals", "mainagent", "planner", "worker", "auto"} {
+		s.migrateLegacyBuiltinPrompt(key)
+	}
+}
+
+func (s *Server) migrateLegacyBuiltinPrompt(key string) {
+	flag := "personal_prompt_migration_v2_" + key
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
-	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
-	a, err := s.m.pg.GetAgentByKey("worker")
+	a, err := s.m.pg.GetAgentByKey(key)
 	if err != nil || a == nil {
-		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
+		return
 	}
-	tmpl := agent.BuiltinPromptSeeds()["worker"]
+	tmpl := agent.BuiltinPromptSeeds()[key]
 	if tmpl == "" {
 		return
 	}
-	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
-	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+	cur, err := s.m.pg.CurrentPrompt(a.ID)
+	if err != nil {
+		log.Printf("[prompts] 读取 %s 当前提示词失败，稍后重试: %v", key, err)
+		return
+	}
+	curHash := normalizedPromptHash(cur)
+	if curHash == normalizedPromptHash(tmpl) {
+		_ = s.m.pg.SetSetting(flag, "true")
+		return
+	}
+	if cur != "" && !isLegacyBuiltinSecurityPrompt(key, cur) {
+		_ = s.m.pg.SetSetting(flag, "true")
+		log.Printf("[prompts] 保留 %s 的自定义提示词（哈希 %s），未执行默认迁移", key, curHash)
+		return
+	}
+	if cur == "" {
+		_ = s.m.pg.SetSetting(flag, "true")
 		return
 	}
 	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
-		log.Printf("[prompts] worker 提示词重刷为新默认失败: %v", err)
+		log.Printf("[prompts] %s 提示词迁移到个人工作台默认失败，重启后重试: %v", key, err)
 		return
 	}
-	log.Printf("[prompts] worker 提示词已追加新默认版本(查上下文段收敛为 list_assets/list_findings,去掉 list_facts/node_detail/asset_neighbors,一次性)")
+	if err := s.m.pg.SetSetting(flag, "true"); err != nil {
+		log.Printf("[prompts] 记录 %s 迁移完成状态失败: %v", key, err)
+		return
+	}
+	log.Printf("[prompts] %s 已从旧安全版默认迁移到个人工作台默认；旧版本保留在历史记录", key)
 }
 
 // reporterToolCallMessage 必须无条件要求先读一次 get_finding_traffic 再写报告。

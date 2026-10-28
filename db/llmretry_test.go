@@ -14,7 +14,11 @@ func TestProfileRetryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer d.Close()
+	// t.Cleanup is LIFO: close after the row cleanup registered below.
+	t.Cleanup(func() { d.Close() })
+	if _, err := d.Exec(`DELETE FROM llm_profiles WHERE name=$1`, "t-retry-roundtrip"); err != nil {
+		t.Fatalf("clean stale profile: %v", err)
+	}
 
 	want := RetryOverride{
 		Connect: RetryRule{Attempts: 5, IntervalMS: 2000},
@@ -71,7 +75,11 @@ func TestProfileRetryClampedOnSave(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer d.Close()
+	// t.Cleanup is LIFO: close after the row cleanup registered below.
+	t.Cleanup(func() { d.Close() })
+	if _, err := d.Exec(`DELETE FROM llm_profiles WHERE name=$1`, "t-retry-clamp"); err != nil {
+		t.Fatalf("clean stale profile: %v", err)
+	}
 
 	id, err := d.SaveProfile(&LLMProfile{
 		Name: "t-retry-clamp", Format: "openai", Model: "m", APIKey: "k",

@@ -2,8 +2,28 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { PlayIcon, PlusIcon, RotateCcwIcon, SaveIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  Loader2Icon,
+  PlayIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  RotateCcwIcon,
+  SaveIcon,
+  SearchIcon,
+  Trash2Icon,
+} from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -161,6 +181,8 @@ function ToolEditor({
   const [enabled, setEnabled] = React.useState(tool.enabled);
   const [rows, setRows] = React.useState<ParamRow[]>(() => toRows(tool.schema));
   const [saving, setSaving] = React.useState(false);
+  const [resetOpen, setResetOpen] = React.useState(false);
+  const [resetting, setResetting] = React.useState(false);
 
   const setRow = (i: number, patch: Partial<ParamRow>) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
@@ -186,13 +208,18 @@ function ToolEditor({
     }
   }
   async function reset() {
+    if (resetting) return;
+    setResetting(true);
     try {
       await api.resetTool(tool.key);
       toast.success(`已恢复「${tool.key}」为代码默认`);
+      setResetOpen(false);
       onSaved();
       onClose();
     } catch (e) {
       toast.error("恢复失败：" + (e as Error).message);
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -257,23 +284,23 @@ function ToolEditor({
               }
             >
               <div className="flex flex-wrap items-center gap-2">
-                {r.parentKey && <span className="text-muted-foreground font-mono text-[10px]">↳</span>}
+                {r.parentKey && <span className="text-muted-foreground font-mono text-xs">↳</span>}
                 <span className="font-mono text-sm">{r.name}</span>
-                <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                <Badge variant="secondary" className="px-1.5 py-0 text-xs">
                   {r.type || "?"}
                 </Badge>
                 {r.required && (
-                  <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                  <Badge variant="outline" className="px-1.5 py-0 text-xs">
                     必填
                   </Badge>
                 )}
                 {r.parentKey && (
-                  <span className="text-muted-foreground text-[10px]">items 子字段</span>
+                  <span className="text-muted-foreground text-xs">items 子字段</span>
                 )}
               </div>
               <div className="grid gap-2">
                 <div className="grid gap-1">
-                  <Label className="text-muted-foreground text-[11px]">描述</Label>
+                  <Label className="text-muted-foreground text-xs">描述</Label>
                   <Input
                     className="text-xs"
                     value={r.description}
@@ -281,7 +308,7 @@ function ToolEditor({
                   />
                 </div>
                 <div className="grid gap-1">
-                  <Label className="text-muted-foreground text-[11px]">默认值</Label>
+                  <Label className="text-muted-foreground text-xs">默认值</Label>
                   <Input
                     className="text-xs"
                     placeholder={r.scalar ? "（空=无默认）" : "仅标量支持"}
@@ -301,10 +328,38 @@ function ToolEditor({
         <Button size="sm" onClick={save} disabled={saving}>
           <SaveIcon /> 保存
         </Button>
-        <Button size="sm" variant="outline" onClick={reset}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={resetting}
+          onClick={() => setResetOpen(true)}
+        >
           <RotateCcwIcon /> 恢复默认
         </Button>
       </div>
+      <AlertDialog open={resetOpen} onOpenChange={(open) => !resetting && setResetOpen(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>恢复「{tool.key}」的代码默认配置？</AlertDialogTitle>
+            <AlertDialogDescription>
+              当前修改过的描述、参数默认值和 Agent 绑定会被代码内置值替换。此操作不可撤销，但不会删除工具本身。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={resetting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={resetting}
+              onClick={(event) => {
+                event.preventDefault();
+                void reset();
+              }}
+            >
+              {resetting && <Loader2Icon className="animate-spin" />}
+              {resetting ? "恢复中…" : "确认恢复"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -320,27 +375,27 @@ function ToolGridCard({ tool, onClick }: { tool: Tool; onClick: () => void }) {
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-sm font-medium">{tool.key}</span>
         {tool.system ? (
-          <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+          <Badge variant="secondary" className="px-1.5 py-0 text-xs">
             系统
           </Badge>
         ) : (
-          <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+          <Badge variant="outline" className="px-1.5 py-0 text-xs">
             自定义·{tool.kind}
           </Badge>
         )}
         {tool.deferred && (
-          <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+          <Badge variant="outline" className="px-1.5 py-0 text-xs">
             deferred
           </Badge>
         )}
         {!tool.enabled && (
-          <Badge variant="outline" className="text-destructive px-1.5 py-0 text-[10px]">
+          <Badge variant="outline" className="text-destructive px-1.5 py-0 text-xs">
             已停用
           </Badge>
         )}
         <Badge
           variant="secondary"
-          className="ml-auto px-1.5 py-0 text-[10px] tabular-nums"
+          className="ml-auto px-1.5 py-0 text-xs tabular-nums"
           title={`累计调用 ${tool.calls ?? 0} 次`}
         >
           调用 {tool.calls ?? 0}
@@ -351,10 +406,10 @@ function ToolGridCard({ tool, onClick }: { tool: Tool; onClick: () => void }) {
       </p>
       <div className="mt-auto flex flex-wrap gap-1 pt-1">
         {tool.agents.length === 0 && (
-          <span className="text-muted-foreground text-[10px]">（未绑定 Agent）</span>
+          <span className="text-muted-foreground text-xs">（未绑定 Agent）</span>
         )}
         {tool.agents.map((a) => (
-          <Badge key={a} variant="outline" className="px-1.5 py-0 text-[10px]">
+          <Badge key={a} variant="outline" className="px-1.5 py-0 text-xs">
             {a}
           </Badge>
         ))}
@@ -367,16 +422,46 @@ export default function ToolsPage() {
   const [tools, setTools] = React.useState<Tool[]>([]);
   const [agents, setAgents] = React.useState<Agent[]>([]);
   const [captureOn, setCaptureOn] = React.useState(false);
+  const [toolsLoading, setToolsLoading] = React.useState(true);
+  const [toolsError, setToolsError] = React.useState("");
+  const [agentsError, setAgentsError] = React.useState("");
+  const [settingsError, setSettingsError] = React.useState("");
   const [selectedKey, setSelectedKey] = React.useState<string | null>(null);
   const [customEdit, setCustomEdit] = React.useState<Tool | "new" | null>(null);
 
-  const reload = React.useCallback(() => {
-    api.tools().then(setTools).catch(() => setTools([]));
+  const reload = React.useCallback(async () => {
+    setToolsLoading(true);
+    setToolsError("");
+    setAgentsError("");
+    setSettingsError("");
+    const [toolsResult, agentsResult, settingsResult] = await Promise.allSettled([
+      api.tools(),
+      api.agents(),
+      api.settings(),
+    ]);
+    if (toolsResult.status === "fulfilled") {
+      setTools(toolsResult.value);
+    } else {
+      setToolsError(
+        (toolsResult.reason as Error)?.message || "无法读取工具列表，请检查网络或服务状态",
+      );
+    }
+    if (agentsResult.status === "fulfilled") {
+      setAgents(agentsResult.value);
+    } else {
+      setAgentsError((agentsResult.reason as Error)?.message || "Agent 列表读取失败");
+    }
+    if (settingsResult.status === "fulfilled") {
+      setCaptureOn(!!settingsResult.value.traffic_capture);
+    } else {
+      setSettingsError(
+        (settingsResult.reason as Error)?.message || "系统设置读取失败，工具启用状态可能不完整",
+      );
+    }
+    setToolsLoading(false);
   }, []);
   React.useEffect(() => {
-    reload();
-    api.agents().then(setAgents).catch(() => {});
-    api.settings().then((s) => setCaptureOn(!!s.traffic_capture)).catch(() => {});
+    void reload();
   }, [reload]);
 
   const [query, setQuery] = React.useState("");
@@ -416,6 +501,29 @@ export default function ToolsPage() {
         </div>
       </div>
 
+      {(agentsError || settingsError) && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+          <p className="font-medium">部分工具配置未能完整加载</p>
+          {agentsError && <p className="text-muted-foreground mt-1 text-xs">Agent：{agentsError}</p>}
+          {settingsError && (
+            <p className="text-muted-foreground mt-1 text-xs">{settingsError}</p>
+          )}
+        </div>
+      )}
+
+      {toolsError && (
+        <div className="border-destructive/40 bg-destructive/5 flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2">
+          <AlertCircleIcon className="text-destructive size-4 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">工具列表读取失败</p>
+            <p className="text-muted-foreground mt-1 text-xs">{toolsError}</p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => void reload()}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+
       <Tabs defaultValue="system">
         <TabsList>
           <TabsTrigger value="system">系统工具</TabsTrigger>
@@ -433,9 +541,17 @@ export default function ToolsPage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {systemTools.length === 0 ? (
+              {toolsLoading && tools.length === 0 ? (
+                <div className="flex justify-center py-8">
+                  <Loader2Icon className="text-muted-foreground size-5 animate-spin" />
+                </div>
+              ) : systemTools.length === 0 ? (
                 <p className="text-muted-foreground py-6 text-center text-sm">
-                  {query.trim() ? "没有匹配的系统工具" : "（暂无系统工具，等待后端 seed）"}
+                  {toolsError
+                    ? "工具列表未加载，请先重试上方请求。"
+                    : query.trim()
+                      ? "没有匹配的系统工具"
+                      : "当前没有系统工具。"}
                 </p>
               ) : (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -466,9 +582,17 @@ export default function ToolsPage() {
               </div>
             </CardHeader>
             <CardContent>
-              {customTools.length === 0 ? (
+              {toolsLoading && tools.length === 0 ? (
+                <div className="flex justify-center py-8">
+                  <Loader2Icon className="text-muted-foreground size-5 animate-spin" />
+                </div>
+              ) : customTools.length === 0 ? (
                 <p className="text-muted-foreground py-6 text-center text-sm">
-                  {query.trim() ? "没有匹配的自定义工具" : "（暂无自定义工具，点击右上角「新建自定义工具」）"}
+                  {toolsError
+                    ? "工具列表未加载，请先重试上方请求。"
+                    : query.trim()
+                      ? "没有匹配的自定义工具"
+                      : "暂无自定义工具，点击右上角「新建自定义工具」。"}
                 </p>
               ) : (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -512,7 +636,7 @@ export default function ToolsPage() {
         onClose={() => setCustomEdit(null)}
         onSaved={() => {
           setCustomEdit(null);
-          reload();
+          void reload();
         }}
       />
     </div>
@@ -560,6 +684,8 @@ function CustomToolDialog({
   const [paramsText, setParamsText] = React.useState("");
   const [testing, setTesting] = React.useState(false);
   const [testResult, setTestResult] = React.useState<{ output: string; is_error: boolean } | null>(null);
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
 
   // (re)load form state when opening.
   React.useEffect(() => {
@@ -640,13 +766,17 @@ function CustomToolDialog({
     }
   }
   async function del() {
-    if (!tool) return;
+    if (!tool || deleting) return;
+    setDeleting(true);
     try {
       await api.deleteCustomTool(tool.key);
       toast.success("已删除");
+      setDeleteOpen(false);
       onSaved();
     } catch (e) {
       toast.error("删除失败：" + (e as Error).message);
+    } finally {
+      setDeleting(false);
     }
   }
   // runTest dry-runs the CURRENT form (unsaved) with the sample params, so a
@@ -685,7 +815,7 @@ function CustomToolDialog({
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4">
           <div className="grid gap-1.5">
             <Label className="text-xs">Key</Label>
-            <Input className="font-mono" placeholder="如 nmap_scan" value={key} disabled={!isNew}
+            <Input className="font-mono" placeholder="如 daily_digest" value={key} disabled={!isNew}
               onChange={(e) => setKey(e.target.value)} />
           </div>
           <div className="grid gap-1.5">
@@ -705,13 +835,17 @@ function CustomToolDialog({
               </SelectContent>
             </Select>
             {kind === "shell" && (
-              <p className="text-muted-foreground text-xs">适合 nmap、sqlmap、ffuf 等出名工具——模型已知用法，只需声明"可在 bash 中调用"即可。名称+描述会追加到 Bash 工具描述里。</p>
+              <p className="text-muted-foreground text-xs">
+                适合日程整理、笔记检索、文件归档等已有命令行能力。模型只需知道命令名称和用途，名称与描述会追加到 Bash 工具说明中。
+              </p>
             )}
           </div>
 
           {kind === "command" && (
             <div className="grid gap-1.5">
-              <Label className="text-xs">命令模板（占位符 {"{param}"}，如 nmap -p {"{ports}"} {"{target}"}）</Label>
+              <Label className="text-xs">
+                命令模板（占位符 {"{param}"}，如 archive --days {"{days}"} {"{folder}"}）
+              </Label>
               <Textarea className="font-mono text-xs" rows={2} value={ex.command}
                 onChange={(e) => setEx({ ...ex, command: e.target.value })} />
             </div>
@@ -773,7 +907,7 @@ function CustomToolDialog({
                 参数 JSON Schema{kind === "http" ? "（http 工具必填，需含 properties）" : "（留空 = 自动给 {args} 薄壳）"}
               </Label>
               <Textarea className="font-mono text-xs" rows={4} value={schemaText}
-                placeholder={'{"type":"object","properties":{"target":{"type":"string"}},"required":["target"]}'}
+                placeholder={'{"type":"object","properties":{"days":{"type":"integer"}},"required":["days"]}'}
                 onChange={(e) => setSchemaText(e.target.value)} />
             </div>
           )}
@@ -805,7 +939,7 @@ function CustomToolDialog({
             <div className="grid gap-1.5 rounded-md border p-3">
               <Label className="text-xs font-medium">测试运行（用当前表单，不会保存）</Label>
               <Textarea className="font-mono text-xs" rows={2} value={paramsText}
-                placeholder={'示例参数 JSON，如 {"target":"example.com"}'}
+                placeholder={'示例参数 JSON，如 {"days":7}'}
                 onChange={(e) => setParamsText(e.target.value)} />
               <div>
                 <Button size="sm" variant="outline" onClick={runTest} disabled={testing}>
@@ -832,11 +966,44 @@ function CustomToolDialog({
             <SaveIcon /> {isNew ? "创建" : "保存"}
           </Button>
           {!isNew && (
-            <Button size="sm" variant="outline" className="text-destructive" onClick={del}>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-destructive"
+              disabled={deleting}
+              onClick={() => setDeleteOpen(true)}
+            >
               <Trash2Icon /> 删除
             </Button>
           )}
         </div>
+        <AlertDialog
+          open={deleteOpen}
+          onOpenChange={(open) => !deleting && setDeleteOpen(open)}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>删除自定义工具「{tool?.key}」？</AlertDialogTitle>
+              <AlertDialogDescription>
+                工具配置、参数定义和 Agent 绑定将被永久删除，相关 Agent 将无法再调用它。此操作不可撤销。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                disabled={deleting}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void del();
+                }}
+              >
+                {deleting && <Loader2Icon className="animate-spin" />}
+                {deleting ? "删除中…" : "确认删除"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </SheetContent>
     </Sheet>
   );

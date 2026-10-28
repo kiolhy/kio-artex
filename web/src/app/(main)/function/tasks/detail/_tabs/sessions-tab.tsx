@@ -385,7 +385,7 @@ function SessionItem({
       >
         {icon ?? <span className="size-3.5 shrink-0" />}
         {s.intent_id && (
-          <span className="shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
+          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-xs tabular-nums text-muted-foreground">
             #{s.intent_id}
           </span>
         )}
@@ -406,12 +406,12 @@ function SessionItem({
         )}
         {hasPending && <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />}
         {!active && unread ? (
-          <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
+          <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-blue-500/15 px-1 text-xs font-medium tabular-nums text-blue-600 dark:text-blue-400">
             {unread > 99 ? "99+" : unread}
           </span>
         ) : null}
         {s.live && (
-          <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+          <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400">
             <span className="size-1 animate-pulse rounded-full bg-blue-500" />
             实时
           </span>
@@ -529,6 +529,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [olderIntentsHasMore, setOlderIntentsHasMore] = React.useState(false);
   const [hasLoadedOlderIntentsPage, setHasLoadedOlderIntentsPage] = React.useState(false);
   const [loadingOlderIntents, setLoadingOlderIntents] = React.useState(false);
+  const [intentsLoaded, setIntentsLoaded] = React.useState(false);
+  const [intentsError, setIntentsError] = React.useState("");
+  const [intentsReloadTick, setIntentsReloadTick] = React.useState(0);
+  const [olderIntentsError, setOlderIntentsError] = React.useState("");
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
@@ -612,7 +616,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           // 真删除:意图及独占下游已物理移除,从列表剔除该行。
           patchIntentState(session.intent_id);
           const d = res.deleted;
-          const extra = d ? `（含 ${d.intents} 意图 / ${d.facts} 事实 / ${d.findings} 漏洞）` : "";
+          const extra = d ? `（含 ${d.intents} 步骤 / ${d.facts} 事实 / ${d.findings} 产出）` : "";
           toast.success(`Worker #${session.intent_id} 及其独占下游已彻底删除${extra}`);
           setCancelReason("");
         } else {
@@ -883,6 +887,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
     setHasLoadedOlderIntentsPage(false);
+    setIntentsLoaded(false);
+    setIntentsError("");
+    setOlderIntentsError("");
     setTaskTokens(null);
     setSessionTokens({});
     setLLMResolutions(null);
@@ -1074,6 +1081,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setOlderIntents([]);
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
+    setIntentsLoaded(false);
+    setIntentsError("");
     const load = () =>
       api
         .intentsPage(taskId, 0, 300)
@@ -1094,9 +1103,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           firstIntentsRef.current = r.items;
           setIntents(r.items);
           setFirstIntentsHasMore(r.hasMore);
+          setIntentsLoaded(true);
+          setIntentsError("");
         })
-        .catch(() => {
-          // Polling is best-effort; the next interval retries automatically.
+        .catch((error) => {
+          if (!active) return;
+          setIntentsLoaded(true);
+          setIntentsError((error as Error).message || "Worker 会话读取失败");
         });
     void load();
     const t = setInterval(load, 5000);
@@ -1104,7 +1117,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       active = false;
       clearInterval(t);
     };
-  }, [taskId]);
+  }, [taskId, intentsReloadTick]);
 
   const loadOlderIntents = React.useCallback(() => {
     if (loadingOlderIntents) return;
@@ -1112,6 +1125,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const minId = all.reduce((m, n) => Math.min(m, Number(n.id)), Infinity);
     if (!Number.isFinite(minId)) return;
     setLoadingOlderIntents(true);
+    setOlderIntentsError("");
     api
       .intentsPage(taskId, minId, 300)
       .then((r) => {
@@ -1121,9 +1135,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         });
         setOlderIntentsHasMore(r.hasMore);
         setHasLoadedOlderIntentsPage(true);
+        setOlderIntentsError("");
       })
-      .catch(() => {
-        // A later manual retry can fetch this page again.
+      .catch((error) => {
+        setOlderIntentsError((error as Error).message || "更早的 Worker 会话读取失败");
       })
       .finally(() => setLoadingOlderIntents(false));
   }, [taskId, intents, olderIntents, loadingOlderIntents]);
@@ -1594,7 +1609,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       · {activeDisplayTitle}
                     </span>
                     {hiddenUnread > 0 && (
-                      <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
+                      <span className="inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-blue-500/15 px-1 text-xs font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
                         {hiddenUnread > 99 ? "99+" : hiddenUnread}
                       </span>
                     )}
@@ -1604,7 +1619,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               {!MOCK && (
                 <span
                   className={cn(
-                    "inline-flex items-center gap-1 text-[10px]",
+                    "inline-flex items-center gap-1 text-xs",
                     sseLive ? "text-emerald-500" : "text-amber-500",
                   )}
                   title={sseLive ? "实时连接正常" : "实时连接中断，正在自动重连（历史仍可见）"}
@@ -1669,7 +1684,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                           disabled={creatingMain}
                           title="新建主 Agent 会话（清空上下文，任务状态保留）"
                           aria-label="新建主 Agent 会话"
-                          className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground disabled:opacity-50"
+                          className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent/60 hover:text-foreground disabled:opacity-50"
                         >
                           {creatingMain ? (
                             <Loader2Icon className="size-3.5 animate-spin" />
@@ -1706,24 +1721,49 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       );
                     })}
                     {role === "worker" && intentsHasMore && (
-                      <button
-                        type="button"
-                        onClick={loadOlderIntents}
-                        disabled={loadingOlderIntents}
-                        className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
-                      >
-                        {loadingOlderIntents ? (
-                          <Loader2Icon className="size-3.5 animate-spin" />
-                        ) : (
-                          <RotateCwIcon className="size-3.5" />
+                      <>
+                        <button
+                          type="button"
+                          onClick={loadOlderIntents}
+                          disabled={loadingOlderIntents}
+                          className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
+                        >
+                          {loadingOlderIntents ? (
+                            <Loader2Icon className="size-3.5 animate-spin" />
+                          ) : (
+                            <RotateCwIcon className="size-3.5" />
+                          )}
+                          加载更早的 Worker
+                        </button>
+                        {olderIntentsError && (
+                          <div className="px-2 py-1 text-xs text-destructive">
+                            {olderIntentsError}，可再次点击重试。
+                          </div>
                         )}
-                        加载更早的 Worker
-                      </button>
+                      </>
                     )}
                   </div>
                 );
               })}
-              {mainLoaded && !workerSessions.length && (
+              {!intentsLoaded && (
+                <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                  正在读取 Worker 会话…
+                </div>
+              )}
+              {intentsError && (
+                <div className="flex items-center gap-2 rounded-md border border-destructive/30 px-2 py-1.5 text-xs text-destructive">
+                  <span className="min-w-0 flex-1">{intentsError}</span>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-destructive/10"
+                    onClick={() => setIntentsReloadTick((tick) => tick + 1)}
+                  >
+                    重试
+                  </button>
+                </div>
+              )}
+              {intentsLoaded && !intentsError && !workerSessions.length && (
                 <div className="px-2 py-1 text-xs text-muted-foreground">暂无运行中的 Worker 会话。</div>
               )}
             </div>
@@ -1748,7 +1788,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   <Tooltip>
                     <TooltipTrigger asChild>{titleEl}</TooltipTrigger>
                     <TooltipContent side="bottom" align="start" className="max-h-80 max-w-sm overflow-auto p-0">
-                      <pre className="p-2 text-[10px] leading-relaxed">{JSON.stringify(meta.json, null, 2)}</pre>
+                      <pre className="p-2 text-xs leading-relaxed">{JSON.stringify(meta.json, null, 2)}</pre>
                     </TooltipContent>
                   </Tooltip>
                 ) : (
@@ -1783,13 +1823,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 <Badge variant="outline">来源任务 #{active.source_task_id} · 只读历史</Badge>
               )}
               {active.live && (
-                <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400">
                   <span className="size-1 animate-pulse rounded-full bg-blue-500" />
                   实时
                 </span>
               )}
               {activeState?.hasMore && (
-                <span className="text-[10px] text-muted-foreground" title="向上滚动加载更早历史">
+                <span className="text-xs text-muted-foreground" title="向上滚动加载更早历史">
                   ↑ 更早历史
                 </span>
               )}
@@ -1946,7 +1986,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     rows={1}
                     aria-label="给主 Agent 发消息"
                     placeholder={
-                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"
+                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用结果、资料等…"
                     }
                     value={input}
                     disabled={sending}
@@ -2029,7 +2069,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   <InputGroupAddon align="block-end">
                     <span
                       className={cn(
-                        "px-1 text-[10px] tabular-nums text-muted-foreground",
+                        "px-1 text-xs tabular-nums text-muted-foreground",
                         workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS && "text-destructive",
                       )}
                     >
@@ -2125,7 +2165,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 ) : (
                   <>
                     <strong>假删除</strong>会把该意图置为「已删除」并记录删除原因，意图节点、执行记录、
-                    已登记的事实和漏洞<strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
+                    已登记的事实和产出<strong>都会保留</strong>。规划者会收到「该步骤由用户删除 + 原因」并据此重新规划。
                   </>
                 )}
               </AlertDialogDescription>

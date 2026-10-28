@@ -1,13 +1,24 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+func shutdownTestServer(t *testing.T, s *Server) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.Shutdown(ctx); err != nil {
+		t.Errorf("server shutdown: %v", err)
+	}
+}
 
 // TestMain acquires a PostgreSQL advisory lock (7337741002) for the entire
 // server test suite so cross-package DELETE cleanup races with db/agent

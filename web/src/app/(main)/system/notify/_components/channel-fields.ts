@@ -116,10 +116,10 @@ export const CHANNEL_FIELDS: Record<string, FieldDef[]> = {
 
 export const SEVERITY_OPTIONS = [
   { value: "", label: "不限" },
-  { value: "low", label: "低危及以上" },
-  { value: "medium", label: "中危及以上" },
-  { value: "high", label: "高危及以上" },
-  { value: "critical", label: "仅严重" },
+  { value: "low", label: "低优先级及以上" },
+  { value: "medium", label: "中优先级及以上" },
+  { value: "high", label: "高优先级及以上" },
+  { value: "critical", label: "仅最高优先级" },
 ];
 
 export type ChannelForm = {
@@ -172,7 +172,7 @@ export function parseIDs(text: string): number[] {
     .map((s) => Number(s))
     .filter((n) => Number.isFinite(n) && n > 0);
 }
-// parseKeywords 解析行/逗号分隔的关键词列表（漏洞类型名可能含空格，所以按行或逗号切）。
+// parseKeywords 解析行/逗号分隔的关键词列表（关键词可能含空格，所以按行或逗号切）。
 export function parseKeywords(text: string): string[] {
   return text
     .split(/[\n,，]+/)

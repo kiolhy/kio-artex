@@ -17,6 +17,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/sidequestion"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 const (
@@ -437,7 +438,8 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	if ua.Detail == "" {
 		ua.Detail = msg
 	}
-	if _, err := pg.AppendConvActivity(c.ID, ua); err != nil {
+	userActivityID, err := pg.AppendConvActivity(c.ID, ua)
+	if err != nil {
 		log.Printf("[conv %d] append user msg failed: %v", c.ID, err)
 	}
 	if c.Title == "" || c.Title == "新对话" {
@@ -454,7 +456,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
 	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
-	s.runConversation(c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey, msg)
+	s.runConversation(c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey, userActivityID, msg)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 
@@ -462,23 +464,25 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 // (each conversation is independent → parallel). Steps stream to
 // conversation_activities. Shared by the chat HTTP handler and the P3 scheduler.
 // busyKey clears when the run ends (best-effort in-flight marker).
-func (s *Server) runConversation(c *db.Conversation, msg, busyKey string, userMessage ...string) {
+func (s *Server) runConversation(c *db.Conversation, msg, busyKey string, userActivityID int64, userMessage ...string) {
 	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
 	// Only the human-message handler supplies this field, before adding the
 	// attachment manifest. Scheduler/retest prompts must not be labelled as users.
 	if len(userMessage) == 1 {
 		ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: userMessage[0]})
 	}
-	go s.runConversationTurn(ctx, cancel, c, msg, busyKey)
+	if !s.goBackground(func() { s.runConversationTurn(ctx, cancel, c, msg, busyKey, userActivityID) }) {
+		cancel(agent.Causef("server_stopping", "服务正在停止", "当前对话未启动"))
+	}
 }
 
 // runConversationSync runs ONE agent turn on a conversation and BLOCKS until the
 // run ends (clearing busyKey). runConversation wraps it in a goroutine for the
 // fire-and-forget chat path; the P3 trigger queue calls it directly so it can wait
 // for completion before starting the next queued fire for the same agent.
-func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
+func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string, userActivityID int64) {
 	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
-	s.runConversationTurn(ctx, cancel, c, msg, busyKey)
+	s.runConversationTurn(ctx, cancel, c, msg, busyKey, userActivityID)
 }
 
 // Register cancellation before returning 202, so an immediate stop/delete cannot
@@ -493,7 +497,7 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 	return ctx, cancel
 }
 
-func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
+func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string, userActivityID int64) {
 	defer func() {
 		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
@@ -560,7 +564,12 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 	}
 	// On a manual stop ctx is cancelled; Chat already emits a clean "已手动停止"
 	// step, so skip the raw-error entry — only surface genuine failures.
-	if _, err := ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit); err != nil {
+	chatOpts := agent.ChatOptions{}
+	if c.AgentKey == "mainagent" && userActivityID > 0 {
+		chatOpts.ExtraTools = []actool.CoreTool{s.createWorkTaskChatTool(c.ID, userActivityID)}
+		chatOpts.SystemPromptSuffix = mainAgentWorkHandoffPrompt
+	}
+	if _, err := ca.ChatWithOptions(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, chatOpts, emit); err != nil {
 		finishReason = err.Error()
 		if ctx.Err() == nil {
 			_, _ = pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
@@ -639,7 +648,10 @@ func (s *Server) pumpLocked(agentKey string) {
 	for s.triggerActive[agentKey] < limit && len(s.triggerQ[agentKey]) > 0 {
 		item := s.nextTriggerRun(agentKey, cfg)
 		s.triggerActive[agentKey]++
-		go s.runAndPump(agentKey, item)
+		if !s.goBackground(func() { s.runAndPump(agentKey, item) }) {
+			s.triggerActive[agentKey]--
+			return
+		}
 	}
 }
 
@@ -815,7 +827,7 @@ func (s *Server) runTriggeredRun(item triggeredRun) {
 	s.chatMu.Lock()
 	s.chatBusy[busyKey] = true
 	s.chatMu.Unlock()
-	s.runConversationSync(c, msg, busyKey)
+	s.runConversationSync(c, msg, busyKey, 0)
 }
 
 // firstLine returns a single-line, length-capped preview (shared with summaries).

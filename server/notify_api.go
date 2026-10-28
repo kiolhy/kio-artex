@@ -52,8 +52,10 @@ type notifyDeliveryDTO struct {
 	SentAt      *time.Time `json:"sent_at,omitempty"`
 	NextAttempt time.Time  `json:"next_attempt_at"`
 	// 消息标题摘要，让历史列表不必展开就能看出这条推的是什么。
-	Title    string `json:"title"`
-	Severity string `json:"severity"`
+	Title      string `json:"title"`
+	Severity   string `json:"severity"`
+	TargetType string `json:"target_type"`
+	TargetID   int64  `json:"target_id"`
 }
 
 func toNotifyChannelDTO(ch *db.NotificationChannel) notifyChannelDTO {
@@ -100,8 +102,12 @@ func toNotifyDeliveryDTO(dl *db.NotificationDelivery) notifyDeliveryDTO {
 		SentAt:      dl.SentAt,
 		NextAttempt: dl.NextAttemptAt,
 		Severity:    snap.Severity,
+		TargetType:  dl.TargetType,
+		TargetID:    dl.TargetID,
 	}
-	if snap.Name != "" {
+	if snap.Title != "" {
+		dto.Title = snap.Title
+	} else if snap.Name != "" {
 		dto.Title = snap.Name
 	} else {
 		dto.Title = snap.VulnClass

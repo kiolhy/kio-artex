@@ -174,7 +174,7 @@ func (d *DB) CreateTaskTemplate(in TaskTemplateInput) (*TaskTemplate, error) {
 INSERT INTO task_templates(name, nkey, description, goal, category_id, intercept_rules)
 VALUES ($1,$2,$3,$4,$5,$6)
 ON CONFLICT (nkey) DO NOTHING
-RETURNING `+taskTemplateCols, in.Name, nkey, in.Description, in.Goal, in.CategoryID, rulesJSON))
+RETURNING `+taskTemplateCols, in.Name, nkey, in.Description, in.Goal, in.CategoryID, string(rulesJSON)))
 	if err == sql.ErrNoRows {
 		return nil, ErrTaskTemplateNameConflict
 	}
@@ -251,7 +251,7 @@ RETURNING `+taskTemplateCols,
 		patch.Description != nil, patch.Description,
 		patch.Goal != nil, patch.Goal,
 		patch.SetCategoryID, patch.CategoryID,
-		patch.SetInterceptRules, rulesJSON,
+		patch.SetInterceptRules, string(rulesJSON),
 	))
 	if err == sql.ErrNoRows {
 		return nil, ErrTaskTemplateNotFound

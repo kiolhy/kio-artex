@@ -7,6 +7,7 @@ export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 export interface Task {
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
+  run_kind?: "personal" | "pentest" | string; // personal=个人多 Agent 执行
   category_id?: number;
   category_name?: string;
   pinned?: boolean;
@@ -41,6 +42,290 @@ export interface Task {
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
 }
 
+// ── Personal workspace ───────────────────────────────────────────────────────
+
+export interface WorkProject {
+  id: number;
+  name: string;
+  color: string;
+  description: string;
+  archived: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkTag {
+  id: number;
+  name: string;
+  color: string;
+}
+
+export interface WorkTask {
+  id: number;
+  title: string;
+  description: string;
+  status: "todo" | "doing" | "done" | "canceled";
+  priority: "low" | "medium" | "high" | "urgent";
+  project_id?: number | null;
+  project_name?: string | null;
+  parent_task_id?: number | null;
+  start_at?: string | null;
+  due_at?: string | null;
+  completed_at?: string | null;
+  repeat_rule: "" | "daily" | "weekly" | "monthly" | "weekdays";
+  artex_task_id?: string | null;
+  automation_status: "pending" | "running" | "done" | "failed" | "canceled";
+  automation_error?: string;
+  automation_result?: string;
+  automation_launched_at?: string | null;
+  automation_finished_at?: string | null;
+  artex_task?: WorkTaskArtexLink | null;
+  origin_conversation_id?: number | null;
+  origin_activity_id?: number | null;
+  idempotency_key?: string;
+  work_task_url: string;
+  artex_task_url: string;
+  cancel_available: boolean;
+  tags: WorkTag[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkTaskArtexLink {
+  id: number;
+  name: string;
+  description: string;
+  status: string;
+  paused: boolean;
+  queued: boolean;
+  deleted: boolean;
+}
+
+export interface WorkAutomationSummary {
+  pending: number;
+  running: number;
+  failed: number;
+}
+
+export interface WorkAutomationOverview {
+  summary: WorkAutomationSummary;
+  tasks: WorkTask[];
+  recent: WorkTask[];
+}
+
+export interface WorkTaskInput {
+  title?: string;
+  description?: string;
+  status?: WorkTask["status"];
+  priority?: WorkTask["priority"];
+  project_id?: number | null;
+  parent_task_id?: number | null;
+  start_at?: string | null;
+  due_at?: string | null;
+  repeat_rule?: WorkTask["repeat_rule"];
+  artex_task_id?: string | null;
+  tag_ids?: number[];
+  pinned_asset_ids?: number[];
+  excluded_asset_ids?: number[];
+}
+
+export type WorkAssetType = "image" | "document" | "table" | "link" | "api";
+export type WorkAssetParseStatus = "pending" | "processing" | "ready" | "partial" | "failed";
+
+export interface WorkAsset {
+  id: number;
+  asset_type: WorkAssetType;
+  title: string;
+  description: string;
+  mime_type: string;
+  file_name: string;
+  size_bytes: number;
+  sha256: string;
+  source_url: string;
+  parse_status: WorkAssetParseStatus;
+  parse_error: string;
+  summary: string;
+  keywords: string[];
+  current_version: number;
+  internal_access: boolean;
+  allowed_hosts: string[];
+  archived_at?: string | null;
+  deleted_at?: string | null;
+  tags: WorkTag[];
+  content_url: string;
+  download_url: string;
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string | null;
+  recommend_reason?: string;
+  relevance?: number;
+}
+
+export interface WorkAssetVersion {
+  id: number;
+  asset_id: number;
+  version_number: number;
+  source_url: string;
+  openapi_content?: string;
+  extracted_text?: string;
+  summary: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface WorkAssetChunk {
+  id: number;
+  asset_id: number;
+  asset_version_id: number;
+  ordinal: number;
+  locator: string;
+  content: string;
+  keywords: string;
+  created_at: string;
+}
+
+export interface WorkAssetDetail {
+  asset: WorkAsset;
+  versions: WorkAssetVersion[];
+  chunks: WorkAssetChunk[];
+}
+
+export interface WorkAssetStats {
+  total: number;
+  processing: number;
+  failed: number;
+  trashed: number;
+}
+
+export interface WorkTaskAssetCandidate {
+  asset: WorkAsset;
+  asset_version_id: number;
+  version_number: number;
+  relevance: number;
+  selection_reason: string;
+  suggested_chunks: WorkAssetChunk[];
+  pinned: boolean;
+}
+
+export interface WorkTaskAssetRun {
+  id: number;
+  task_id: number;
+  artex_task_id: string;
+  asset_id: number;
+  asset_title: string;
+  asset_type: WorkAssetType;
+  asset_version_id: number;
+  version_number: number;
+  chunk_ids: number[];
+  selection_reason: string;
+  relevance: number;
+  source: string;
+  snapshot: Record<string, unknown> | null;
+  created_at: string;
+  content_preview: string;
+}
+
+export interface WorkTaskAssets {
+  pinned: WorkAsset[];
+  excluded: WorkAsset[];
+  recommended: WorkTaskAssetCandidate[];
+  runs: WorkTaskAssetRun[];
+}
+
+export interface WorkAssetInput {
+  asset_type: WorkAssetType;
+  title: string;
+  description?: string;
+  mime_type?: string;
+  file_name?: string;
+  source_url?: string;
+  summary?: string;
+  keywords?: string[];
+  tag_ids?: number[];
+  internal_access?: boolean;
+  allowed_hosts?: string[];
+  openapi_content?: string;
+  request_example?: string;
+  archived?: boolean;
+}
+
+export interface WorkReminder {
+  id: number;
+  task_id: number;
+  kind: "due" | "overdue";
+  minutes: number;
+  fired: boolean;
+  fired_at?: string | null;
+  channel_ids: number[];
+}
+
+export interface WorkCalendarEvent {
+  id: number;
+  title: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  resourceId: "work" | "artex";
+  source: "work" | "artex";
+  status: string;
+  startEditable?: boolean;
+  durationEditable?: boolean;
+}
+
+export interface WorkNote {
+  id: number;
+  title: string;
+  content: string;
+  pinned: boolean;
+  archived: boolean;
+  tags: WorkTag[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkNoteInput {
+  title?: string;
+  content?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  tag_ids?: number[];
+}
+
+export interface WorkReminderFeedSnapshot {
+  kind?: string;
+  title?: string;
+  body?: string;
+  source?: string;
+  detail_url?: string;
+  target_type?: string;
+  target_id?: number;
+}
+
+export interface WorkReminderFeedEvent {
+  id: number;
+  kind: "work_task_reminder_due" | "work_task_reminder_overdue" | string;
+  target_id: number;
+  snapshot: WorkReminderFeedSnapshot;
+  created_at: string;
+}
+
+export interface WorkSettings {
+  default_reminder_minutes: number;
+  default_channel_id?: number | null;
+  updated_at: string;
+}
+
+export interface WorkDashboardCardLayout {
+  type: string;
+  visible: boolean;
+  span: 1 | 2 | 3 | 4;
+}
+
+export interface WorkDashboardLayout {
+  version: number;
+  cards: WorkDashboardCardLayout[];
+}
+
 export interface TaskCategory {
   id: number;
   name: string;
@@ -61,20 +346,13 @@ export interface TaskTemplate {
 }
 
 export interface DeleteTaskOptions {
-  delete_assets: boolean;
-  delete_traffic: boolean;
   delete_files: boolean;
-  delete_findings: boolean;
   delete_llm_records: boolean;
 }
 
 export interface DeleteTaskResult {
   deleted: string;
-  assets_deleted: number;
-  assets_detached: number;
-  traffic_deleted: number;
   files_deleted: boolean;
-  findings_deleted: number;
   llm_records_deleted: number;
   cleanup_warning?: string;
 }
@@ -627,6 +905,7 @@ export type ActivityKind =
   | "usage" // live cumulative token usage (per model turn); not rendered
   | "llm_switch" // automatic/manual task-level LLM switch
   | "llm_failover" // task-level provider switch / chain exhaustion audit event
+  | "work_task_created" // main agent handed a user request to the work automation queue
   | "intercept_request"; // user-approval request from the intercept layer
 
 // ChatAttachment 是一次上传的文件:path 相对该会话/任务工作目录(即 agent 的 CWD)。
@@ -650,6 +929,12 @@ export interface Activity {
   detail?: string;
   metadata?: {
     llm_transition?: LLMTransition;
+    task_id?: number;
+    title?: string;
+    automation_status?: WorkTask["automation_status"];
+    work_task_url?: string;
+    artex_task_url?: string;
+    cancel_available?: boolean;
   };
   source_task_id?: string;
   inherited?: boolean;
@@ -1006,8 +1291,10 @@ export interface NotificationMeta {
 // NotificationDelivery 是一条投递记录，用于投递历史与失败重发。
 export interface NotificationDelivery {
   id: number;
-  finding_id: string;
-  event_kind: string; // finding_created | finding_status_changed
+  finding_id?: string;
+  event_kind: string; // finding_created | finding_status_changed | work_task_*
+  target_type?: string;
+  target_id?: string;
   channel_id: number;
   channel_name: string;
   channel_kind: string;

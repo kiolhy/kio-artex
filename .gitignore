@@ -58,3 +58,18 @@ Thumbs.db
 /bench/
 /Dockerfile.bench
 /Dockerfile.bench.v2
+# 本机验收产物（UI 截图 / UIAutomator dump / 日志 / 二进制）
+/*.png
+/*.xml
+/*.log
+/*.csv
+/*.exe
+/artex-linux-amd64
+/artex-linux-amd64*
+/*.new
+/*.old
+
+# 本地构建输出与外部客户端源码（各自独立仓库，不随主仓提交）
+/out/
+/server/webui/
+/android/

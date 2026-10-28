@@ -2,9 +2,18 @@
 
 import * as React from "react";
 
-import { CpuIcon, FlaskConicalIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
+import {
+  CpuIcon,
+  FlaskConicalIcon,
+  KeyboardIcon,
+  RadioTowerIcon,
+  RefreshCwIcon,
+  SearchIcon,
+  ShieldAlertIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,8 +27,6 @@ import type { Settings } from "@/lib/types";
 import { UpdateCard } from "./_components/update-card";
 
 export default function SystemSettingsPage() {
-  const [trafficCapture, setTrafficCapture] = React.useState(false);
-  const [agentTrafficBinding, setAgentTrafficBinding] = React.useState(false);
   const [webSearch, setWebSearch] = React.useState(false);
   const [backend, setBackend] = React.useState("ddgs");
   const [braveKeySet, setBraveKeySet] = React.useState(false);
@@ -29,10 +36,9 @@ export default function SystemSettingsPage() {
   const [savingTavilyKey, setSavingTavilyKey] = React.useState(false);
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
-  const [globalProxyInput, setGlobalProxyInput] = React.useState("");
-  const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
+  const [loadError, setLoadError] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [savingKey, setSavingKey] = React.useState(false);
   const [pyInterp, setPyInterp] = React.useState("");
@@ -47,14 +53,11 @@ export default function SystemSettingsPage() {
   const sendMode = useChatSendMode();
 
   const apply = React.useCallback((s: Settings) => {
-    setTrafficCapture(!!s.traffic_capture);
-    setAgentTrafficBinding(!!s.agent_traffic_binding);
     setWebSearch(!!s.web_search_enabled);
     setBackend(s.web_search_backend || "ddgs");
     setBraveKeySet(!!s.brave_key_set);
     setTavilyKeySet(!!s.tavily_key_set);
     setProxyInput(s.web_search_proxy ?? "");
-    setGlobalProxyInput(s.global_proxy ?? "");
     setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
     setInjectPlanner(s.constraints_inject_planner !== false);
@@ -95,50 +98,36 @@ export default function SystemSettingsPage() {
     api
       .detectPython()
       .then((r) => setPyInterp(r.python_interpreter))
-      .catch(() => undefined)
+      .catch((error) => toast.error("自动检测 Python 失败：" + (error as Error).message))
       .finally(() => setSaving(false));
   };
 
-  React.useEffect(() => {
+  const load = React.useCallback(() => {
+    setLoaded(false);
+    setLoadError("");
     api
       .settings()
-      .then(apply)
-      .catch(() => undefined)
+      .then((settings) => {
+        apply(settings);
+        setLoaded(true);
+      })
+      .catch((error) => setLoadError((error as Error).message || "读取系统配置失败"))
       .finally(() => setLoaded(true));
   }, [apply]);
 
-  const toggleTraffic = (v: boolean) => {
-    setTrafficCapture(v); // optimistic
-    setSaving(true);
-    api
-      .setSettings({ traffic_capture: v })
-      .then(apply)
-      .catch(() => setTrafficCapture(!v)) // revert on failure
-      .finally(() => setSaving(false));
-  };
+  React.useEffect(() => {
+    load();
+  }, [load]);
 
   const toggleInjectPlanner = (v: boolean) => {
     setInjectPlanner(v); // optimistic
     api
       .setSettings({ constraints_inject_planner: v })
       .then(apply)
-      .catch(() => setInjectPlanner(!v)); // revert on failure
-  };
-
-  const toggleAgentTrafficBinding = (v: boolean) => {
-    setAgentTrafficBinding(v);
-    setSaving(true);
-    api
-      .setSettings({ agent_traffic_binding: v })
-      .then((s) => {
-        apply(s);
-        toast.success(v ? "已开启 Agent 自动绑定流量" : "已关闭 Agent 自动绑定流量");
-      })
-      .catch((e) => {
-        setAgentTrafficBinding(!v);
-        toast.error(`保存失败：${(e as Error).message}`);
-      })
-      .finally(() => setSaving(false));
+      .catch((error) => {
+        setInjectPlanner(!v);
+        toast.error(`保存失败：${(error as Error).message}`);
+      });
   };
 
   const toggleInjectWorker = (v: boolean) => {
@@ -146,7 +135,10 @@ export default function SystemSettingsPage() {
     api
       .setSettings({ constraints_inject_worker: v })
       .then(apply)
-      .catch(() => setInjectWorker(!v)); // revert on failure
+      .catch((error) => {
+        setInjectWorker(!v);
+        toast.error(`保存失败：${(error as Error).message}`);
+      });
   };
 
   const toggleNoaCompaction = (v: boolean) => {
@@ -173,11 +165,17 @@ export default function SystemSettingsPage() {
         toast.success("已保存网络搜索配置");
       })
       .catch((e) => {
-        toast.error("保存失败：" + (e as Error).message);
+        const message = (e as Error).message;
+        toast.error("保存失败：" + message);
         api
           .settings()
           .then(apply)
-          .catch(() => undefined);
+          .catch((reloadError) => {
+            toast.error(
+              "保存失败，且重新读取配置失败：" +
+                ((reloadError as Error).message || message),
+            );
+          });
       })
       .finally(() => setSaving(false));
   };
@@ -220,18 +218,6 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingProxy(false));
   };
 
-  const saveGlobalProxy = () => {
-    setSavingGlobalProxy(true);
-    api
-      .setSettings({ global_proxy: globalProxyInput.trim() })
-      .then((s) => {
-        apply(s);
-        toast.success(globalProxyInput.trim() ? "已保存全局代理" : "已清除全局代理（改为直连）");
-      })
-      .catch((e) => toast.error("保存失败：" + (e as Error).message))
-      .finally(() => setSavingGlobalProxy(false));
-  };
-
   // Run a real "test" search ("test") against the CURRENT form values (backend +
   // proxy + entered key), falling back to saved values server-side. Toasts result.
   const runTest = () => {
@@ -261,6 +247,19 @@ export default function SystemSettingsPage() {
         <p className="text-muted-foreground text-sm">全局运行时开关</p>
       </div>
 
+      {loadError && (
+        <Alert variant="destructive">
+          <AlertTitle>系统配置读取失败</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>{loadError}。为避免覆盖现有设置，表单已暂时禁用。</span>
+            <Button type="button" variant="outline" size="sm" onClick={load} disabled={!loaded}>
+              <RefreshCwIcon className={!loaded ? "animate-spin" : undefined} />
+              重试
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* 多列而非 grid：网络搜索卡片比其余高数倍，且高度随所选后端变化（brave/tavily
           的 key 输入是条件渲染）。grid 会按最高的一张撑满整行、在旁边留下大片空白，
           多列则自动按内容高度平衡填充。卡片间距靠 mb 而非 gap——多列布局下
@@ -271,108 +270,12 @@ export default function SystemSettingsPage() {
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <RadioTowerIcon className="size-4" />
-              流量捕获
-            </CardTitle>
-            <CardDescription>
-              开启后，所有 Agent 的 HTTP 流量经记录代理全量落库，并向 Agent 注入 traffic_search / traffic_get
-              工具与代理配置（提示词含代理说明）。
-              <br />
-              关闭（默认）时不记录任何流量：Agent
-              <b>不会</b>拿到代理配置与流量工具，提示词也<b>不含</b>代理相关内容。切换后会即时重建 Agent 生效。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex items-center justify-between gap-4">
-            <Label htmlFor="traffic-capture" className="text-sm font-normal text-muted-foreground">
-              {trafficCapture ? "已开启 · 正在记录流量并注入代理" : "已关闭 · 不记录、不注入代理"}
-            </Label>
-            <Switch
-              id="traffic-capture"
-              checked={trafficCapture}
-              disabled={!loaded || saving}
-              onCheckedChange={toggleTraffic}
-            />
-          </CardContent>
-        </Card>
-
-        <Card className="mb-4 break-inside-avoid md:mb-6">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <RadioTowerIcon className="size-4" />
-              Agent 自动绑定流量
-            </CardTitle>
-            <CardDescription id="agent-traffic-binding-description">
-              默认关闭。开启后，漏洞入库时触发的报告 Agent 会核对已有 HTTP 请求/响应，关联对应流量后再编写报告。
-              <b>查阅数据包及额外的工具调用会增加 Token 消耗。</b>
-              <br />
-              TCP、未抓包或没有匹配流量时仍可正常上报。此开关不影响流量捕获、人工绑定及已保存证据的查看。 对下一轮 Agent
-              生效；关闭后会立即拒绝新的自动绑定。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex items-center justify-between gap-4">
-            <Label htmlFor="agent-traffic-binding" className="text-sm font-normal text-muted-foreground">
-              {agentTrafficBinding ? "已开启 · 会增加 Token 消耗" : "已关闭 · 可继续人工绑定"}
-            </Label>
-            <Switch
-              id="agent-traffic-binding"
-              aria-describedby="agent-traffic-binding-description"
-              checked={agentTrafficBinding}
-              disabled={!loaded || saving}
-              onCheckedChange={toggleAgentTrafficBinding}
-            />
-          </CardContent>
-        </Card>
-
-        <Card className="mb-4 break-inside-avoid md:mb-6">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <RadioTowerIcon className="size-4" />
-              全局代理
-            </CardTitle>
-            <CardDescription>
-              所有 Agent 的<b>目标流量</b>经此代理出网（隐藏源 IP / 走跳板）。支持 <b>http / https / socks5</b>，可带{" "}
-              <code>user:pass</code> 认证。留空=直连。
-              <br />
-              开启<b>流量捕获</b>时，它作为记录代理的<b>上游</b>（流量仍全量落库，再经此代理出网）；关闭捕获时，直接注入
-              Agent 的 bash / WebFetch 出网。与网络搜索代理、LLM 代理相互独立。
-              <br />
-              <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持（curl
-              可用，部分工具可能忽略）； 若主要用 socks5，建议开启流量捕获——此路径由 MITM
-              亲自拨号，工具无感知、稳定生效。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-2">
-            <Label htmlFor="global-proxy" className="text-sm font-normal text-muted-foreground">
-              代理地址
-            </Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="global-proxy"
-                autoComplete="off"
-                placeholder="socks5://user:pass@host:1080 或 http://host:port（留空=直连）"
-                value={globalProxyInput}
-                disabled={!loaded || savingGlobalProxy}
-                onChange={(e) => setGlobalProxyInput(e.target.value)}
-              />
-              <Button type="button" onClick={saveGlobalProxy} disabled={!loaded || savingGlobalProxy}>
-                保存
-              </Button>
-            </div>
-            <p className="text-muted-foreground text-xs">
-              {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card className="mb-4 break-inside-avoid md:mb-6">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
               <ShieldAlertIcon className="size-4" />
               操作约束注入
             </CardTitle>
             <CardDescription>
               开启后，把每个任务的<b>操作约束</b>（在任务总览「操作约束」里维护的 allow/deny 条目）拼进对应 Agent
-              的系统提示，用来框定探索边界（如「仅测当前端口」「禁止爆破」）。
+              的系统提示，用来框定执行边界（如「仅处理指定主题」「不修改无关文件」）。
               <br />
               可分别控制注入到 <b>规划者（planner）</b>与 <b>执行者（worker）</b>
               ；默认都开。切换即时生效（下一轮读取），无需重建 Agent。关闭后该 Agent 不再看到约束。
@@ -386,7 +289,7 @@ export default function SystemSettingsPage() {
               <Switch
                 id="inject-planner"
                 checked={injectPlanner}
-                disabled={!loaded}
+                disabled={!loaded || !!loadError}
                 onCheckedChange={toggleInjectPlanner}
               />
             </div>
@@ -397,7 +300,7 @@ export default function SystemSettingsPage() {
               <Switch
                 id="inject-worker"
                 checked={injectWorker}
-                disabled={!loaded}
+                disabled={!loaded || !!loadError}
                 onCheckedChange={toggleInjectWorker}
               />
             </div>
@@ -426,7 +329,7 @@ export default function SystemSettingsPage() {
             <Switch
               id="noa-compaction"
               checked={noaCompaction}
-              disabled={!loaded}
+              disabled={!loaded || !!loadError}
               onCheckedChange={toggleNoaCompaction}
             />
           </CardContent>
@@ -441,7 +344,7 @@ export default function SystemSettingsPage() {
             <CardDescription>
               这是网络搜索的<b>总开关 + 来源配置</b>。开启后，才能在<b>每个 Agent 的配置</b>里单独选择是否启用
               <b>web_search</b>（仅返回标题/链接/摘要，不抓取正文；抓取由 WebFetch 负责）。网络搜索<b>不走</b>
-              记录代理，独立于流量捕获。
+              记录代理，独立于其它设置。
               <br />
               来源可选 <b>DuckDuckGo（ddgs）</b>（无需 Key）、<b>Brave（免费版）</b>（需填写 Brave API Key）、{" "}
               <b>Tavily</b>（需填写 Tavily API Key）或 <b>DeepSeek</b>（复用当前 LLM 配置）。总开关关闭时，各
@@ -456,7 +359,7 @@ export default function SystemSettingsPage() {
               <Switch
                 id="web-search"
                 checked={webSearch}
-                disabled={!loaded || saving}
+                disabled={!loaded || !!loadError || saving}
                 onCheckedChange={(v) => {
                   setWebSearch(v); // optimistic
                   saveWebSearch({ web_search_enabled: v });
@@ -469,7 +372,7 @@ export default function SystemSettingsPage() {
                 <Label className="text-sm font-normal text-muted-foreground">搜索来源</Label>
                 <Select
                   value={backend}
-                  disabled={!loaded || saving}
+                  disabled={!loaded || !!loadError || saving}
                   onValueChange={(v) => {
                     setBackend(v); // optimistic
                     saveWebSearch({ web_search_backend: v });
@@ -498,7 +401,7 @@ export default function SystemSettingsPage() {
                 </p>
                 <p className="text-muted-foreground text-xs leading-relaxed">
                   与其它来源不同，搜索由 <b>DeepSeek 服务端执行</b>：每次搜索会额外消耗一次模型调用（产生 Token
-                  费用），搜索请求<b>不经过上面的出口代理</b>，也<b>不计入流量留痕</b>；返回结果<b>只有标题和链接</b>
+                  费用），搜索请求<b>不经过上面的出口代理</b>；返回结果<b>只有标题和链接</b>
                   （无摘要），需要正文时由 WebFetch 抓取。
                 </p>
                 <p className="text-muted-foreground text-xs leading-relaxed">
@@ -520,13 +423,13 @@ export default function SystemSettingsPage() {
                     autoComplete="off"
                     placeholder={braveKeySet ? "已配置（留空则不变）" : "输入 Brave API Key"}
                     value={braveKeyInput}
-                    disabled={!loaded || savingKey}
+                    disabled={!loaded || !!loadError || savingKey}
                     onChange={(e) => setBraveKeyInput(e.target.value)}
                   />
                   <Button
                     type="button"
                     onClick={saveBraveKey}
-                    disabled={!loaded || savingKey || braveKeyInput.trim() === ""}
+                    disabled={!loaded || !!loadError || savingKey || braveKeyInput.trim() === ""}
                   >
                     保存
                   </Button>
@@ -555,13 +458,13 @@ export default function SystemSettingsPage() {
                     autoComplete="off"
                     placeholder={tavilyKeySet ? "已配置（留空则不变）" : "输入 Tavily API Key（tvly-…）"}
                     value={tavilyKeyInput}
-                    disabled={!loaded || savingTavilyKey}
+                    disabled={!loaded || !!loadError || savingTavilyKey}
                     onChange={(e) => setTavilyKeyInput(e.target.value)}
                   />
                   <Button
                     type="button"
                     onClick={saveTavilyKey}
-                    disabled={!loaded || savingTavilyKey || tavilyKeyInput.trim() === ""}
+                    disabled={!loaded || !!loadError || savingTavilyKey || tavilyKeyInput.trim() === ""}
                   >
                     保存
                   </Button>
@@ -586,15 +489,15 @@ export default function SystemSettingsPage() {
                     autoComplete="off"
                     placeholder="http://host:port 或 socks5://host:port（留空=直连）"
                     value={proxyInput}
-                    disabled={!loaded || savingProxy}
+                    disabled={!loaded || !!loadError || savingProxy}
                     onChange={(e) => setProxyInput(e.target.value)}
                   />
-                  <Button type="button" onClick={saveProxy} disabled={!loaded || savingProxy}>
+                  <Button type="button" onClick={saveProxy} disabled={!loaded || !!loadError || savingProxy}>
                     保存
                   </Button>
                 </div>
                 <p className="text-muted-foreground text-xs">
-                  独立出口代理，仅用于访问搜索端点（VPN/SOCKS 等）。与记录流量的 MITM 代理无关；网络不通时经此代理访问。
+                  独立出口代理，仅用于访问搜索端点（VPN/SOCKS 等）。与其它代理设置无关；网络不通时经此代理访问。
                 </p>
               </div>
             )}
@@ -608,7 +511,7 @@ export default function SystemSettingsPage() {
                   type="button"
                   variant="outline"
                   onClick={runTest}
-                  disabled={!loaded || testing}
+                  disabled={!loaded || !!loadError || testing}
                   className="shrink-0"
                 >
                   {testing ? "测试中…" : "测试搜索"}
@@ -635,13 +538,13 @@ export default function SystemSettingsPage() {
                 className="font-mono text-sm"
                 placeholder="/usr/bin/python3（留空=自动检测）"
                 value={pyInterp}
-                disabled={!loaded || saving}
+                disabled={!loaded || !!loadError || saving}
                 onChange={(e) => setPyInterp(e.target.value)}
               />
-              <Button variant="outline" onClick={detectPython} disabled={!loaded || saving}>
+              <Button variant="outline" onClick={detectPython} disabled={!loaded || !!loadError || saving}>
                 重新检测
               </Button>
-              <Button onClick={savePython} disabled={!loaded || saving}>
+              <Button onClick={savePython} disabled={!loaded || !!loadError || saving}>
                 保存
               </Button>
             </div>
@@ -655,7 +558,7 @@ export default function SystemSettingsPage() {
               工作并发 · Work Agent 数
             </CardTitle>
             <CardDescription>
-              每个任务并发运行的工作 agent 数量（默认 3）。数值越大并发探测越多、消耗也越高。修改后
+              每个任务并发运行的工作 agent 数量（默认 3）。数值越大并发执行越多、消耗也越高。修改后
               <b>对之后启动的任务生效</b>，正在运行的任务不受影响。
             </CardDescription>
           </CardHeader>
@@ -667,10 +570,10 @@ export default function SystemSettingsPage() {
                 className="w-32 font-mono text-sm"
                 placeholder="3"
                 value={workers}
-                disabled={!loaded || savingWorkers}
+                disabled={!loaded || !!loadError || savingWorkers}
                 onChange={(e) => setWorkers(e.target.value)}
               />
-              <Button onClick={saveWorkers} disabled={!loaded || savingWorkers}>
+              <Button onClick={saveWorkers} disabled={!loaded || !!loadError || savingWorkers}>
                 保存
               </Button>
             </div>

@@ -2,9 +2,20 @@
 
 import * as React from "react";
 
-import { BellIcon, PlusIcon, SendIcon, Trash2Icon } from "lucide-react";
+import { BellIcon, PlusIcon, RefreshCwIcon, SendIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,6 +41,7 @@ import {
 } from "./_components/channel-fields";
 import { ConfigField, FilterSummary } from "./_components/channel-form";
 import { DeliveryList } from "./_components/delivery-list";
+import { ReminderDefaultsCard } from "./_components/reminder-defaults";
 import { formatBacklog, StatTile } from "./_components/stat-tile";
 
 // 本页只负责编排：加载数据、维护表单状态、调用接口。
@@ -39,6 +51,10 @@ import { formatBacklog, StatTile } from "./_components/stat-tile";
 export default function NotifyPage() {
   const [meta, setMeta] = React.useState<NotificationMeta | null>(null);
   const [channels, setChannels] = React.useState<NotificationChannel[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
+  const [deleteTarget, setDeleteTarget] = React.useState<NotificationChannel | null>(null);
+  const [deletingId, setDeletingId] = React.useState<number | null>(null);
   const [tab, setTab] = React.useState<"channels" | "deliveries">("channels");
 
   const [open, setOpen] = React.useState(false);
@@ -52,20 +68,17 @@ export default function NotifyPage() {
   const [digestMin, setDigestMin] = React.useState("");
 
   const load = React.useCallback(() => {
-    api
-      .notifyMeta()
-      .then((m) => {
+    setLoading(true);
+    setLoadError("");
+    Promise.all([api.notifyMeta(), api.notifyChannels()])
+      .then(([m, list]) => {
         setMeta(m);
         setBaseURL(m.public_base_url);
         setDigestMin(m.digest_interval_min);
+        setChannels(list);
       })
-      .catch((e) => toast.error("读取推送配置失败：" + (e as Error).message));
-    // 渠道列表加载失败要报出来：静默失败会显示成「一个渠道都没有」，
-    // 用户会以为配置丢了，比直接报错更让人慌。
-    api
-      .notifyChannels()
-      .then(setChannels)
-      .catch((e) => toast.error("读取渠道列表失败：" + (e as Error).message));
+      .catch((error) => setLoadError((error as Error).message || "读取通知配置失败"))
+      .finally(() => setLoading(false));
   }, []);
   React.useEffect(() => {
     load();
@@ -211,13 +224,17 @@ export default function NotifyPage() {
   }
 
   async function removeChannel(ch: NotificationChannel) {
+    setDeletingId(ch.id);
     try {
       await api.notifyDeleteChannel(ch.id);
       toast.success(`已删除：${ch.name}`);
+      setDeleteTarget(null);
       setOpen(false);
       load();
     } catch (e) {
       toast.error("删除失败：" + (e as Error).message);
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -269,7 +286,7 @@ export default function NotifyPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">通知推送</h1>
           <p className="text-muted-foreground text-sm">
-            发现漏洞时推送到钉钉 / 飞书 / 企业微信等渠道 · 每个渠道可独立设推送时机与过滤规则
+            待办提醒 / 任务通知推送到钉钉 / 飞书 / 企业微信等渠道 · 每个渠道可独立设推送时机与过滤规则
           </p>
         </div>
         {meta && (
@@ -287,6 +304,19 @@ export default function NotifyPage() {
         )}
       </div>
 
+      {loadError && (
+        <Alert variant="destructive">
+          <AlertTitle>通知配置读取失败</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>{loadError}。页面数据可能不是最新状态。</span>
+            <Button type="button" size="sm" variant="outline" onClick={load} disabled={loading}>
+              <RefreshCwIcon className={loading ? "animate-spin" : undefined} />
+              重试
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
       {meta && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
           <StatTile label="渠道" value={`${meta.stats.channels_on} / ${meta.stats.channels}`} hint="启用 / 总数" />
@@ -302,6 +332,8 @@ export default function NotifyPage() {
           />
         </div>
       )}
+
+      <ReminderDefaultsCard />
 
       <Card className="gap-3">
         <CardHeader>
@@ -332,7 +364,7 @@ export default function NotifyPage() {
             <p className="text-muted-foreground text-xs">仅对「汇总」模式的渠道生效。</p>
           </div>
           <div className="sm:col-span-2">
-            <Button onClick={saveGlobal} disabled={globalSaving}>
+            <Button onClick={saveGlobal} disabled={globalSaving || !!loadError || !meta}>
               保存全局设置
             </Button>
           </div>
@@ -350,7 +382,8 @@ export default function NotifyPage() {
             <button
               type="button"
               onClick={openAdd}
-              className="text-foreground/70 border-foreground/70 hover:bg-muted/60 hover:shadow-sm flex min-h-[130px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed transition"
+              disabled={!meta || loading}
+              className="text-foreground/70 border-foreground/70 hover:bg-muted/60 hover:shadow-sm flex min-h-[130px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed transition disabled:cursor-not-allowed disabled:opacity-50"
             >
               <PlusIcon className="size-6" />
               <span className="text-sm">添加渠道</span>
@@ -375,17 +408,16 @@ export default function NotifyPage() {
                         checked={ch.enabled}
                         onCheckedChange={() => toggleEnabled(ch)}
                         onClick={(e) => e.stopPropagation()}
-                        aria-label="启用"
+                        aria-label={`${ch.enabled ? "停用" : "启用"}通知渠道 ${ch.name}`}
                       />
                       <Button
                         size="icon"
                         variant="outline"
-                        aria-label="删除"
+                        aria-label={`删除通知渠道 ${ch.name}`}
+                        disabled={deletingId === ch.id}
                         onClick={(e) => {
                           e.stopPropagation();
-                          // void 显式丢弃 Promise：removeChannel 自己 catch 并 toast，
-                          // 这里不需要 await（onClick 不是 async）。
-                          void removeChannel(ch);
+                          setDeleteTarget(ch);
                         }}
                       >
                         <Trash2Icon className="text-destructive" />
@@ -410,6 +442,34 @@ export default function NotifyPage() {
           <DeliveryList channels={channels} />
         </TabsContent>
       </Tabs>
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(next) => {
+          if (!next && deletingId === null) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除通知渠道「{deleteTarget?.name}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              删除后，该渠道将不再接收任务提醒和系统通知，历史投递记录不会被删除。此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingId !== null}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deletingId !== null || !deleteTarget}
+              onClick={(event) => {
+                event.preventDefault();
+                if (deleteTarget) void removeChannel(deleteTarget);
+              }}
+            >
+              {deletingId !== null ? "删除中…" : "删除渠道"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetContent side="right" className="w-full data-[side=right]:sm:max-w-lg">
@@ -484,12 +544,12 @@ export default function NotifyPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="realtime">实时 · 每条漏洞单独发一条</SelectItem>
+                    <SelectItem value="realtime">实时 · 每条通知单独发一条</SelectItem>
                     <SelectItem value="digest">汇总 · 按周期合并成一条</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-muted-foreground text-xs">
-                  想做「高危实时、其余汇总」就建两个渠道：一个实时 + 门槛高危，一个汇总 + 不限级别。
+                  想做「紧急实时、其余汇总」就建两个渠道：一个实时 + 门槛紧急，一个汇总 + 不限优先级。
                 </p>
               </div>
 
@@ -512,7 +572,7 @@ export default function NotifyPage() {
                 <p className="mb-3 text-sm font-medium">过滤规则（留空即不过滤）</p>
                 <div className="grid gap-4">
                   <div className="grid gap-2">
-                    <Label>最低级别</Label>
+                    <Label>最低优先级</Label>
                     <Select
                       value={form.minSeverity || "all"}
                       onValueChange={(v) => setF({ minSeverity: v === "all" ? "" : v })}
@@ -530,10 +590,10 @@ export default function NotifyPage() {
                     </Select>
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="n-inc">只推这些漏洞类型</Label>
+                    <Label htmlFor="n-inc">只推这些关键词</Label>
                     <Textarea
                       id="n-inc"
-                      placeholder={"SQL注入\n命令执行"}
+                      placeholder={"例如：截止提醒\n任务完成"}
                       value={form.includeText}
                       onChange={(e) => setF({ includeText: e.target.value })}
                     />
@@ -542,10 +602,10 @@ export default function NotifyPage() {
                     </p>
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="n-exc">排除这些漏洞类型</Label>
+                    <Label htmlFor="n-exc">排除这些关键词</Label>
                     <Textarea
                       id="n-exc"
-                      placeholder={"信息泄露"}
+                      placeholder={"例如：日常杂项"}
                       value={form.excludeText}
                       onChange={(e) => setF({ excludeText: e.target.value })}
                     />
@@ -560,23 +620,13 @@ export default function NotifyPage() {
                       onChange={(e) => setF({ taskIDsText: e.target.value })}
                     />
                   </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="n-assets">限定资产 ID</Label>
-                    <Input
-                      id="n-assets"
-                      placeholder="10, 11"
-                      value={form.assetIDsText}
-                      onChange={(e) => setF({ assetIDsText: e.target.value })}
-                    />
-                    <p className="text-muted-foreground text-xs">任务/资产留空=不限；填写后要求与漏洞有交集。</p>
-                  </div>
                   <div className="flex items-center gap-2 text-sm">
                     <Switch
                       checked={form.onStatusChange}
                       onCheckedChange={(v) => setF({ onStatusChange: v })}
                       aria-label="接收状态变更"
                     />
-                    漏洞处置状态变更时也推送（仅实时模式）
+                    任务状态变更时也推送（仅实时模式）
                   </div>
                 </div>
               </div>

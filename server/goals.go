@@ -382,6 +382,7 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 		as = s.m.Assets()
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	ctx = agent.WithRunInfo(ctx, agent.RunInfo{TaskID: taskID, RunKind: t.RunKind})
 	s.engine.BeginLLMCall(t.ID)
 	goalRuntime := s.agentsForTask(t).runtime
 	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)

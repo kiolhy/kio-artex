@@ -216,6 +216,54 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 	return id, tx.Commit()
 }
 
+// AddFactYielded atomically creates a fact node and its intent --yields--> fact
+// edge. Normal personal-worker delivery uses this instead of separate AddNode and
+// Link calls so the planner can never observe an unlinked fact.
+func (s *ExplorationStore) AddFactYielded(intentID int64, payload map[string]any, origin string, anchors []int64) (int64, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var kind string
+	if err := tx.QueryRow(`SELECT kind FROM exploration_nodes
+WHERE id=$1 AND exploration_id=$2 FOR UPDATE`, intentID, s.expID).Scan(&kind); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("intent not found")
+		}
+		return 0, err
+	}
+	if kind != KindIntent {
+		return 0, fmt.Errorf("intent_id must reference an intent")
+	}
+
+	var id int64
+	if err := tx.QueryRow(`
+INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
+VALUES ($1, $2, $3, 5, 'confirmed', $4) RETURNING id`,
+		s.expID, KindFact, string(raw), origin).Scan(&id); err != nil {
+		return 0, err
+	}
+	for _, a := range anchors {
+		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, a); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.Exec(`
+INSERT INTO exploration_edges(exploration_id, src_id, rel, dst_id)
+VALUES ($1,$2,$3,$4)
+ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`,
+		s.expID, intentID, RelYields, id); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
 // AddIntent is a convenience: an open intent.
 func (s *ExplorationStore) AddIntent(payload map[string]any, priority int, anchors []int64, origin string) (int64, error) {
 	if origin == "" {
@@ -561,7 +609,7 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 				exploration_id, worker, kind, summary, metadata,
 				input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at)
 				VALUES ($1,'token-ledger','result',$2,$3,$4,$5,$6,$7,$8)`,
-				s.expID, fmt.Sprintf("已取消意图 #%d 的 Token 计量", iid), metadata,
+				s.expID, fmt.Sprintf("已取消意图 #%d 的 Token 计量", iid), string(metadata),
 				bucket.Usage.InputTokens, bucket.Usage.OutputTokens,
 				bucket.Usage.CacheReadTokens, bucket.Usage.CacheWriteTokens, bucket.Day); err != nil {
 				return out, err
@@ -1169,6 +1217,21 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 	return exists, err
 }
 
+// OpenGoalWithoutActiveIntent reports the stalled planning state in one snapshot:
+// at least one goal is still open, but there is no queued or running work item.
+// Keeping this as one query avoids a false result if a worker claims or creates an
+// intent between two separate checks.
+func (s *ExplorationStore) OpenGoalWithoutActiveIntent() (bool, error) {
+	var stalled bool
+	err := s.db.QueryRow(`SELECT
+  EXISTS(SELECT 1 FROM exploration_nodes
+         WHERE exploration_id=$1 AND kind='goal' AND state='open')
+  AND NOT EXISTS(SELECT 1 FROM exploration_nodes
+                 WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running'))`,
+		s.expID).Scan(&stalled)
+	return stalled, err
+}
+
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
@@ -1203,6 +1266,7 @@ func (s *ExplorationStore) Stats() (map[string]int, error) {
 
 // AppendActivity records one worker step and returns its id.
 func (s *ExplorationStore) AppendActivity(a Activity) (int64, error) {
+	a = SanitizeActivity(a)
 	metadata := a.Metadata
 	if len(metadata) == 0 {
 		metadata = json.RawMessage(`{}`)
@@ -1502,6 +1566,7 @@ FROM activity WHERE exploration_id=$1 AND id>$2 ORDER BY id LIMIT $3`, s.expID, 
 			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens, &a.MainSeg); err != nil {
 			return nil, sinceID, err
 		}
+		a = SanitizeActivity(a)
 		if a.ID > cursor {
 			cursor = a.ID
 		}
@@ -1539,6 +1604,7 @@ func (s *ExplorationStore) ActivityListForTerminalIntent(nodeID, sinceID int64, 
 			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
 			return nil, sinceID, err
 		}
+		a = SanitizeActivity(a)
 		if a.ID > cursor {
 			cursor = a.ID
 		}
@@ -1615,6 +1681,7 @@ ORDER BY id DESC LIMIT $%d`, cond, beforeArg, beforeArg, limitArg)
 			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens, &a.MainSeg); err != nil {
 			return nil, false, err
 		}
+		a = SanitizeActivity(a)
 		desc = append(desc, a)
 	}
 	if err := rows.Err(); err != nil {
@@ -1660,6 +1727,7 @@ func (s *ExplorationStore) ActivityPageForTerminalIntent(nodeID, before int64, l
 			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
 			return nil, false, err
 		}
+		a = SanitizeActivity(a)
 		desc = append(desc, a)
 	}
 	if err := rows.Err(); err != nil {
@@ -1747,7 +1815,7 @@ func (s *ExplorationStore) ActivityDetail(id int64) (string, error) {
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
-	return d.String, err
+	return RedactSecrets(d.String), err
 }
 
 // scanTrace reads the summary-only column set shared by the worker-trace tools
@@ -1760,6 +1828,7 @@ func scanTrace(rows *sql.Rows) ([]Activity, error) {
 		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.IsError, &a.Summary); err != nil {
 			return nil, err
 		}
+		a = SanitizeActivity(a)
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -1972,6 +2041,7 @@ FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.
 		if err := rows.Scan(&a.ID, &a.NodeID, &a.Kind, &a.Tool, &a.IsError, &a.Detail); err != nil {
 			return nil, err
 		}
+		a = SanitizeActivity(a)
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -2008,6 +2078,7 @@ func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activ
 		if err := rows.Scan(&a.ID, &a.NodeID, &a.Kind, &a.Tool, &a.IsError, &a.Detail); err != nil {
 			return nil, err
 		}
+		a = SanitizeActivity(a)
 		out = append(out, a)
 	}
 	return out, rows.Err()

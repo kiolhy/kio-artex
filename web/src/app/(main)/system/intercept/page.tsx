@@ -7,10 +7,21 @@ import {
   ListFilterIcon,
   PencilIcon,
   PlusIcon,
+  RefreshCwIcon,
   ShieldAlertIcon,
   Trash2Icon,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,7 +83,7 @@ function fmtTokens(n: number): string {
 function JudgeStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border bg-muted/20 px-3 py-2">
-      <div className="text-[10px] text-muted-foreground">{label}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-0.5 text-lg font-semibold tabular-nums">{value}</div>
     </div>
   );
@@ -209,29 +220,46 @@ function JudgeCard() {
   const [cfg, setCfg] = React.useState<JudgeConfig>(defaultJudge());
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
+  const [profileError, setProfileError] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [usage, setUsage] = React.useState<JudgeUsage | null>(null);
+  const [usageLoading, setUsageLoading] = React.useState(false);
+  const [usageError, setUsageError] = React.useState("");
 
-  // 审批用量统计:失败不打断配置页,仅在开启时拉取。
   const loadUsage = React.useCallback(async () => {
+    setUsageLoading(true);
     try {
       setUsage(await api.interceptJudgeUsage(30));
-    } catch {
-      // 忽略:统计不可用不应影响配置编辑
+      setUsageError("");
+    } catch (e) {
+      setUsageError((e as Error).message || "未知错误");
+    } finally {
+      setUsageLoading(false);
     }
   }, []);
 
   const load = React.useCallback(async () => {
     setLoading(true);
-    try {
-      const [j, ps] = await Promise.all([api.interceptGetJudgeConfig(), api.llmProfiles()]);
-      setCfg(j);
-      setProfiles(ps);
-    } catch (e) {
-      toast.error("加载模型兜底配置失败: " + (e as Error).message);
-    } finally {
-      setLoading(false);
+    setLoadError("");
+    setProfileError("");
+    const [configResult, profilesResult] = await Promise.allSettled([
+      api.interceptGetJudgeConfig(),
+      api.llmProfiles(),
+    ]);
+
+    if (configResult.status === "fulfilled") {
+      setCfg(configResult.value);
+    } else {
+      setLoadError((configResult.reason as Error)?.message || "未知错误");
     }
+
+    if (profilesResult.status === "fulfilled") {
+      setProfiles(profilesResult.value);
+    } else {
+      setProfileError((profilesResult.reason as Error)?.message || "未知错误");
+    }
+    setLoading(false);
   }, []);
 
   React.useEffect(() => {
@@ -248,6 +276,10 @@ function JudgeCard() {
   }
 
   async function save() {
+    if (loadError) {
+      toast.error("配置尚未成功加载，不能保存");
+      return;
+    }
     setSaving(true);
     try {
       await api.interceptSetJudgeConfig(cfg);
@@ -261,6 +293,10 @@ function JudgeCard() {
   }
 
   async function restorePrompt() {
+    if (loadError) {
+      toast.error("配置尚未成功加载，不能恢复默认模板");
+      return;
+    }
     // 清空提示词并保存 → 服务端下次返回内置模板全文,回填到输入框。
     setSaving(true);
     try {
@@ -277,6 +313,34 @@ function JudgeCard() {
 
   return (
     <div className="space-y-4">
+      {loadError && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4">
+          <div className="space-y-1">
+            <p className="text-sm font-medium text-destructive">审批配置读取失败</p>
+            <p className="text-xs text-destructive/90">
+              当前显示的不是服务端真实配置。为避免覆盖现有设置，已禁用保存与恢复操作。
+            </p>
+            <p className="text-xs text-muted-foreground">{loadError}</p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
+            <RefreshCwIcon className={loading ? "animate-spin" : undefined} />
+            {loading ? "重试中…" : "重新加载"}
+          </Button>
+        </div>
+      )}
+
+      {profileError && !loadError && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-400/50 bg-amber-50/50 p-3">
+          <p className="text-xs text-amber-800">
+            模型列表读取失败，仍可选择“跟随激活配置”；具体模型下拉暂不可用。{profileError}
+          </p>
+          <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
+            <RefreshCwIcon className={loading ? "animate-spin" : undefined} />
+            重试
+          </Button>
+        </div>
+      )}
+
       {/* 启用开关 —— 独立高亮条 */}
       <div
         className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-3 ${
@@ -288,17 +352,30 @@ function JudgeCard() {
           <div>
             <p className="text-sm font-semibold leading-tight">模型兜底审批</p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              在<span className="font-medium text-foreground">拦截范围</span>内、且<span className="font-medium text-foreground">没有任何拦截规则命中</span>的命令，才由模型做语义判断（放行 / 转人工 / 拦截）
+              在<span className="font-medium text-foreground">审批范围</span>内、且<span className="font-medium text-foreground">没有任何规则命中</span>的工具调用，才由模型做语义判断（放行 / 转人工 / 阻止）
             </p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <span className="text-xs text-muted-foreground">{cfg.enabled ? "已启用" : "未启用"}</span>
-          <Switch checked={cfg.enabled} disabled={loading} onCheckedChange={(v) => patch({ enabled: v })} />
+          <Switch
+            checked={cfg.enabled}
+            disabled={loading || !!loadError}
+            onCheckedChange={(v) => patch({ enabled: v })}
+          />
         </div>
       </div>
 
       {/* 审批 Token 用量统计(全局累计,独立于各模型配置) */}
+      {cfg.enabled && usageError && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+          <p className="text-destructive text-sm">审批用量读取失败：{usageError}</p>
+          <Button size="sm" variant="outline" onClick={() => void loadUsage()} disabled={usageLoading}>
+            <RefreshCwIcon /> {usageLoading ? "重试中…" : "重试"}
+          </Button>
+        </div>
+      )}
+
       {cfg.enabled && usage && (
         <Card>
           <CardContent className="p-4">
@@ -322,7 +399,7 @@ function JudgeCard() {
             </div>
             {usage.daily.length > 0 && (
               <div className="mt-4">
-                <p className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <p className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
                   近 30 天每日消耗(输入 + 输出)
                 </p>
                 <JudgeSparkbars daily={usage.daily} />
@@ -342,7 +419,13 @@ function JudgeCard() {
                   <p className="text-sm font-medium">审批提示词</p>
                   <p className="text-xs text-muted-foreground">模型据此判定 ALLOW / ASK / DENY，可直接编辑</p>
                 </div>
-                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={restorePrompt} disabled={saving}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={restorePrompt}
+                  disabled={saving || !!loadError}
+                >
                   恢复默认模板
                 </Button>
               </div>
@@ -353,7 +436,7 @@ function JudgeCard() {
                 placeholder="留空使用内置模板"
                 spellCheck={false}
               />
-              <p className="text-right text-[11px] text-muted-foreground">{cfg.prompt.length} 字</p>
+                <p className="text-right text-xs text-muted-foreground">{cfg.prompt.length} 字</p>
             </CardContent>
           </Card>
 
@@ -361,9 +444,13 @@ function JudgeCard() {
           <Card className="lg:col-span-2">
             <CardContent className="space-y-5 p-4">
               <div className="space-y-4">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">判定模型与策略</p>
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">判定模型与策略</p>
                 <Field label="审批模型">
-                  <Select value={String(cfg.profile_id || 0)} onValueChange={(v) => patch({ profile_id: Number(v) })}>
+                  <Select
+                    value={String(cfg.profile_id || 0)}
+                    onValueChange={(v) => patch({ profile_id: Number(v) })}
+                    disabled={!!loadError || (!!profileError && cfg.profile_id !== 0)}
+                  >
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value={FOLLOW_ACTIVE}>跟随激活配置</SelectItem>
@@ -401,7 +488,7 @@ function JudgeCard() {
               <Separator />
 
               <div className="space-y-4">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">人工审批（模型判为「转人工」时）</p>
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">人工审批（模型判为「转人工」时）</p>
                 <Field label="审批等待超时（秒）">
                   <Input
                     type="number"
@@ -429,7 +516,7 @@ function JudgeCard() {
       )}
 
       <div className="flex justify-end">
-        <Button size="sm" onClick={save} disabled={saving || loading}>
+        <Button size="sm" onClick={save} disabled={saving || loading || !!loadError}>
           {saving ? "保存中…" : "保存配置"}
         </Button>
       </div>
@@ -442,8 +529,11 @@ function JudgeCard() {
 export default function InterceptPage() {
   const [rules, setRules]     = React.useState<InterceptRule[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
   const [open, setOpen]       = React.useState(false);
   const [editing, setEditing] = React.useState<InterceptRule | null>(null);
+  const [pendingDelete, setPendingDelete] = React.useState<InterceptRule | null>(null);
+  const [deletingId, setDeletingId] = React.useState<number | null>(null);
   const [form, setForm]       = React.useState<RuleForm>(defaultForm());
   const [saving, setSaving]   = React.useState(false);
   const [regexErr, setRegexErr] = React.useState("");
@@ -455,6 +545,7 @@ export default function InterceptPage() {
   const [enabledTools, setEnabledTools] = React.useState<Set<string>>(new Set());
   const [scopeLoading, setScopeLoading] = React.useState(false);
   const [scopeSaving, setScopeSaving]   = React.useState(false);
+  const [scopeError, setScopeError]     = React.useState("");
   const [scopeTools, setScopeTools]     = React.useState<string[]>([]); // 页头信息条:当前进入拦截的工具
 
   // ---- data ----
@@ -463,17 +554,21 @@ export default function InterceptPage() {
     try {
       const cfg = await api.interceptGetToolConfig();
       setScopeTools(cfg.enabled_tools);
-    } catch {
-      // 信息条非关键,失败静默
+      setScopeError("");
+    } catch (e) {
+      setScopeError((e as Error).message || "未知错误");
     }
   }, []);
 
   const load = React.useCallback(async () => {
+    setLoading(true);
     try {
       const r = await api.interceptRules();
       setRules(r);
-    } catch {
-      toast.error("加载拦截规则失败");
+      setLoadError("");
+    } catch (e) {
+      setLoadError((e as Error).message || "未知错误");
+      toast.error("加载审批规则失败");
     } finally {
       setLoading(false);
     }
@@ -541,13 +636,18 @@ export default function InterceptPage() {
     }
   }
 
-  async function handleDelete(id: number) {
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setDeletingId(pendingDelete.id);
     try {
-      await api.deleteInterceptRule(id);
+      await api.deleteInterceptRule(pendingDelete.id);
       toast.success("规则已删除");
-      load();
+      setPendingDelete(null);
+      await load();
     } catch (e) {
       toast.error((e as Error).message);
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -565,11 +665,13 @@ export default function InterceptPage() {
   async function openScope() {
     setScopeOpen(true);
     setScopeLoading(true);
+    setScopeError("");
     try {
       const [tools, cfg] = await Promise.all([api.tools(), api.interceptGetToolConfig()]);
       setAllTools(tools);
       setEnabledTools(new Set(cfg.enabled_tools));
     } catch (e) {
+      setScopeError((e as Error).message || "未知错误");
       toast.error("加载失败: " + (e as Error).message);
     } finally {
       setScopeLoading(false);
@@ -609,14 +711,14 @@ export default function InterceptPage() {
       <div className="flex items-center gap-2.5">
         <ShieldAlertIcon className="h-5 w-5 shrink-0" />
         <div>
-          <h1 className="text-lg font-semibold leading-tight">命令拦截</h1>
+          <h1 className="text-lg font-semibold leading-tight">工具执行审批</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            工具执行前先按拦截规则匹配；未命中的命令可交由模型兜底判定
+            自动任务调用工具前先按规则审批；未命中的调用可交由模型兜底判定
           </p>
         </div>
       </div>
 
-      {/* ---- 拦截范围信息条（规则匹配与模型兜底共用：不在范围内的工具两者都不介入）---- */}
+      {/* ---- 审批范围信息条（规则匹配与模型兜底共用：不在范围内的工具两者都不介入）---- */}
       <div
         className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-2.5 ${
           scopeTools.length === 0
@@ -626,10 +728,12 @@ export default function InterceptPage() {
       >
         <div className="flex min-w-0 items-center gap-2 text-sm">
           <ListFilterIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="shrink-0 font-medium">拦截范围</span>
-          {scopeTools.length === 0 ? (
+          <span className="shrink-0 font-medium">审批范围</span>
+          {scopeError ? (
+            <span className="truncate text-destructive">范围读取失败：{scopeError}</span>
+          ) : scopeTools.length === 0 ? (
             <span className="text-amber-700 dark:text-amber-500">
-              未启用任何工具 — 拦截规则与模型兜底均不会生效
+              未启用任何工具 — 审批规则与模型兜底均不会生效
             </span>
           ) : (
             <>
@@ -641,23 +745,23 @@ export default function InterceptPage() {
           )}
         </div>
         <Button
-          variant={scopeTools.length === 0 ? "default" : "outline"}
+          variant={scopeTools.length === 0 || scopeError ? "default" : "outline"}
           size="sm"
           className="shrink-0"
-          onClick={openScope}
+          onClick={scopeError ? () => void loadScope() : openScope}
         >
-          <ListFilterIcon className="h-4 w-4" />
-          调整范围
+          {scopeError ? <RefreshCwIcon className="h-4 w-4" /> : <ListFilterIcon className="h-4 w-4" />}
+          {scopeError ? "重试" : "调整范围"}
         </Button>
       </div>
 
       <Tabs defaultValue="rules" className="flex-1">
         <TabsList>
-          <TabsTrigger value="rules">拦截规则</TabsTrigger>
+          <TabsTrigger value="rules">执行规则</TabsTrigger>
           <TabsTrigger value="judge">模型配置</TabsTrigger>
         </TabsList>
 
-        {/* ---- tab: 拦截规则 ---- */}
+        {/* ---- tab: 执行规则 ---- */}
         <TabsContent value="rules" className="mt-4 flex flex-col gap-4">
           <div className="flex items-center justify-between gap-3">
             <p className="text-xs text-muted-foreground">
@@ -672,7 +776,19 @@ export default function InterceptPage() {
           <Card>
             <CardContent className="p-0">
           {loading ? (
-            <p className="p-6 text-sm text-muted-foreground">加载中…</p>
+            <div className="space-y-2 p-4">
+              {Array.from({ length: 4 }, (_, i) => (
+                <div key={`rule-skeleton-${i}`} className="h-10 animate-pulse rounded bg-muted" />
+              ))}
+            </div>
+          ) : loadError ? (
+            <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+              <p className="text-sm text-destructive">审批规则读取失败：{loadError}</p>
+              <Button size="sm" variant="outline" onClick={() => void load()}>
+                <RefreshCwIcon className="h-4 w-4" />
+                重试
+              </Button>
+            </div>
           ) : rules.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
               <ShieldAlertIcon className="h-8 w-8 text-muted-foreground/40" />
@@ -725,6 +841,7 @@ export default function InterceptPage() {
                       <Switch
                         checked={rule.enabled}
                         onCheckedChange={() => handleToggle(rule)}
+                        aria-label={`${rule.enabled ? "停用" : "启用"}规则 ${rule.name}`}
                       />
                     </TableCell>
                     <TableCell>
@@ -732,13 +849,15 @@ export default function InterceptPage() {
                         <Button
                           size="icon" variant="ghost" className="h-7 w-7"
                           onClick={() => openEdit(rule)}
+                          aria-label={`编辑规则 ${rule.name}`}
                         >
                           <PencilIcon className="h-3.5 w-3.5" />
                         </Button>
                         <Button
                           size="icon" variant="ghost"
                           className="h-7 w-7 text-destructive hover:text-destructive"
-                          onClick={() => handleDelete(rule.id)}
+                          onClick={() => setPendingDelete(rule)}
+                          aria-label={`删除规则 ${rule.name}`}
                         >
                           <Trash2Icon className="h-3.5 w-3.5" />
                         </Button>
@@ -816,7 +935,7 @@ export default function InterceptPage() {
 
             <Field label="模式">
               <Input
-                placeholder={form.match_type === "regex" ? "^Bash$" : "rm -rf"}
+                placeholder={form.match_type === "regex" ? "^(Write|Edit)$" : "删除文件"}
                 value={form.pattern}
                 onChange={(e) => set({ pattern: e.target.value })}
                 className={regexErr ? "border-destructive focus-visible:ring-destructive" : ""}
@@ -831,7 +950,7 @@ export default function InterceptPage() {
 
             <Separator />
 
-            <Field label="拦截策略">
+            <Field label="审批策略">
               <Select
                 value={form.action}
                 onValueChange={(v) => set({ action: v as InterceptAction })}
@@ -846,9 +965,9 @@ export default function InterceptPage() {
             </Field>
 
             {form.action !== "allow" && (
-              <Field label={form.action === "deny" ? "拒绝消息（返回给模型）" : "审批说明（可选）"}>
+            <Field label={form.action === "deny" ? "拒绝消息（返回给模型）" : "审批说明（可选）"}>
                 <Textarea
-                  placeholder={form.action === "deny" ? "操作被安全策略阻止" : ""}
+                  placeholder={form.action === "deny" ? "该工具调用未获允许" : ""}
                   value={form.message}
                   onChange={(e) => set({ message: e.target.value })}
                   rows={2}
@@ -922,27 +1041,34 @@ export default function InterceptPage() {
         </SheetContent>
       </Sheet>
 
-      {/* ---- scope dialog ---- */}
+        {/* ---- scope dialog ---- */}
       <Dialog open={scopeOpen} onOpenChange={setScopeOpen}>
         <DialogContent className="sm:max-w-lg flex flex-col overflow-hidden p-0 gap-0" style={{ maxHeight: "min(80vh, 560px)" }}>
           <DialogHeader className="shrink-0 border-b px-6 py-4">
             <DialogTitle className="flex items-center gap-2">
               <ListFilterIcon className="h-4 w-4" />
-              拦截范围
+              审批范围
             </DialogTitle>
             <DialogDescription className="text-xs">
-              只有启用拦截的工具才会进入规则匹配；其余工具直接放行
+              只有启用审批的工具才会进入规则匹配；其余工具直接放行
             </DialogDescription>
           </DialogHeader>
 
           <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-5">
             {scopeLoading ? (
               <p className="text-sm text-muted-foreground py-4">加载中…</p>
+            ) : scopeError ? (
+              <div className="flex flex-col items-center gap-3 py-8 text-center">
+                <p className="text-sm text-destructive">范围读取失败：{scopeError}</p>
+                <Button size="sm" variant="outline" onClick={() => void openScope()}>
+                  <RefreshCwIcon /> 重试
+                </Button>
+              </div>
             ) : (
               toolGroups.map((group, gi) => (
                 <div key={group.label}>
                   {gi > 0 && <Separator className="mb-5" />}
-                  <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
                     {group.label}
                   </p>
                   <div className="space-y-0.5">
@@ -957,11 +1083,11 @@ export default function InterceptPage() {
                           <div className="flex items-center gap-1.5">
                             <span className="font-mono text-sm">{t.key}</span>
                             {(t.kind && t.kind !== "builtin") && (
-                              <Badge variant="outline" className="px-1 py-0 text-[10px]">{t.kind}</Badge>
+                              <Badge variant="outline" className="px-1 py-0 text-xs">{t.kind}</Badge>
                             )}
                           </div>
                           {t.description && (
-                            <p className="text-[11px] text-muted-foreground line-clamp-1">{t.description}</p>
+                            <p className="text-xs text-muted-foreground line-clamp-1">{t.description}</p>
                           )}
                         </label>
                       </div>
@@ -980,6 +1106,33 @@ export default function InterceptPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog
+        open={!!pendingDelete}
+        onOpenChange={(next) => !next && deletingId === null && setPendingDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除审批规则「{pendingDelete?.name}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              删除后，匹配该规则的工具调用将不再按此策略审批，可能继续进入模型兜底或直接放行。此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingId !== null}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deletingId !== null}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmDelete();
+              }}
+            >
+              {deletingId !== null ? "删除中…" : "删除规则"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

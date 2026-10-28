@@ -70,11 +70,13 @@ func (c *NotificationChannel) IsEnabled() bool { return c.Enabled == nil || *c.E
 
 // NotificationEvent 是一条事件事实。
 type NotificationEvent struct {
-	ID        int64           `json:"id"`
-	Kind      string          `json:"kind"`
-	FindingID int64           `json:"finding_id"`
-	Snapshot  json.RawMessage `json:"snapshot"`
-	CreatedAt time.Time       `json:"created_at"`
+	ID         int64           `json:"id"`
+	Kind       string          `json:"kind"`
+	FindingID  int64           `json:"finding_id"`
+	TargetType string          `json:"target_type"`
+	TargetID   int64           `json:"target_id"`
+	Snapshot   json.RawMessage `json:"snapshot"`
+	CreatedAt  time.Time       `json:"created_at"`
 }
 
 const notificationChannelCols = `id, name, kind, enabled, config, mode, filter, rate_per_min, created_at, updated_at`
@@ -286,7 +288,7 @@ func (d *DB) FanOutPendingEvents(ctx context.Context, limit int) (eventCount, de
 	if err != nil {
 		return 0, 0, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id, kind, finding_id, snapshot FROM notification_events
+	rows, err := tx.QueryContext(ctx, `SELECT id, kind, finding_id, target_type, target_id, snapshot FROM notification_events
 WHERE NOT fanned_out ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $1`, limit)
 	if err != nil {
 		return 0, 0, err
@@ -297,9 +299,15 @@ WHERE NOT fanned_out ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $1`, limit)
 	)
 	for rows.Next() {
 		var ev NotificationEvent
-		if err := rows.Scan(&ev.ID, &ev.Kind, &ev.FindingID, &ev.Snapshot); err != nil {
+		var targetType sql.NullString
+		var targetID sql.NullInt64
+		if err := rows.Scan(&ev.ID, &ev.Kind, &ev.FindingID, &targetType, &targetID, &ev.Snapshot); err != nil {
 			rows.Close()
 			return 0, 0, err
+		}
+		ev.TargetType = targetType.String
+		if targetID.Valid {
+			ev.TargetID = targetID.Int64
 		}
 		var snap notify.Snapshot
 		// 快照是我们自己写的，理论上必定可解析；解析失败不阻断投递流程，
@@ -325,6 +333,11 @@ WHERE NOT fanned_out ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $1`, limit)
 	}
 	var toInsert []pending
 	for i, snap := range parsedSnaps {
+		if events[i].TargetType == "work_task" {
+			// Work reminders always carry explicit channel targets; finding filters
+			// must never route (or drop) a personal reminder.
+			continue
+		}
 		for _, ch := range channels {
 			if !notify.Match(notify.ParseFilter(ch.Filter), snap) {
 				continue

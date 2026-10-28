@@ -103,7 +103,7 @@ export function DeliveryList({ channels }: { channels: NotificationChannel[] }) 
           <TableHeader>
             <TableRow>
               <TableHead className="w-40">时间</TableHead>
-              <TableHead>漏洞</TableHead>
+              <TableHead>通知</TableHead>
               <TableHead className="w-40">渠道</TableHead>
               <TableHead className="w-24">状态</TableHead>
               <TableHead className="w-16">尝试</TableHead>

@@ -15,6 +15,16 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -107,11 +117,13 @@ function PoolSheet({
   open,
   onOpenChange,
   pool,
+  error,
   onReload,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   pool: LLMPoolStatus | null;
+  error?: string;
   onReload: () => Promise<void>;
 }) {
   const [busy, setBusy] = React.useState(false);
@@ -119,7 +131,7 @@ function PoolSheet({
   // 冷却倒计时是后端算出的剩余秒数——抽屉开着且有配置不正常时才定时拉，让它走起来。
   React.useEffect(() => {
     if (!open || !pool?.enabled || !pool.chain.some((m) => m.state !== "ok")) return;
-    const t = setInterval(() => void onReload(), 10_000);
+    const t = setInterval(() => void onReload().catch(() => undefined), 10_000);
     return () => clearInterval(t);
   }, [open, pool, onReload]);
 
@@ -171,6 +183,22 @@ function PoolSheet({
         </SheetHeader>
 
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-6">
+          {error && (
+            <div className="flex items-start justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+              <p className="text-destructive text-sm">轮询状态读取失败：{error}</p>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  void onReload().catch((e) => {
+                    toast.error("轮询状态重试失败：" + ((e as Error).message || "未知错误"));
+                  });
+                }}
+              >
+                <RefreshCwIcon /> 重试
+              </Button>
+            </div>
+          )}
           <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
             <div className="grid gap-0.5">
               <Label className="text-sm">启用轮询</Label>
@@ -788,6 +816,11 @@ function ProfileSheet({
 export default function LLMPage() {
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [pool, setPool] = React.useState<LLMPoolStatus | null>(null);
+  const [profilesLoading, setProfilesLoading] = React.useState(true);
+  const [profilesError, setProfilesError] = React.useState("");
+  const [poolError, setPoolError] = React.useState("");
+  const [pendingDelete, setPendingDelete] = React.useState<LLMProfile | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
   const [poolOpen, setPoolOpen] = React.useState(false);
   // 抽屉的开关和内容分开存：关闭时 editing 保持不变，否则关闭动画期间标题会从
   // 「编辑 X」闪成「新建」。editing = null 表示新建。
@@ -801,18 +834,24 @@ export default function LLMPage() {
   const loadPool = React.useCallback(async () => {
     try {
       setPool(await api.llmPool());
-    } catch {
-      /* ignore */
+      setPoolError("");
+    } catch (e) {
+      const message = (e as Error).message || "未知错误";
+      setPoolError(message);
+      throw e;
     }
   }, []);
 
   const load = React.useCallback(async () => {
-    try {
-      setProfiles(await api.llmProfiles());
-    } catch {
-      /* ignore */
+    setProfilesLoading(true);
+    const [profilesResult] = await Promise.allSettled([api.llmProfiles(), loadPool()]);
+    if (profilesResult.status === "fulfilled") {
+      setProfiles(profilesResult.value);
+      setProfilesError("");
+    } else {
+      setProfilesError((profilesResult.reason as Error)?.message || "未知错误");
     }
-    await loadPool();
+    setProfilesLoading(false);
   }, [loadPool]);
 
   React.useEffect(() => {
@@ -836,17 +875,24 @@ export default function LLMPage() {
     }
   }
 
-  async function remove(p: LLMProfile) {
+  async function confirmDelete() {
+    const p = pendingDelete;
+    if (!p) return;
     if (p.is_default) {
       toast.error("无法删除当前激活的配置");
+      setPendingDelete(null);
       return;
     }
+    setDeleting(true);
     try {
       await api.deleteLLMProfile(p.id);
       toast.success(`已删除：${p.name}`);
+      setPendingDelete(null);
       await load();
     } catch (e) {
       toast.error(`删除失败：${(e as Error).message}`);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -883,7 +929,25 @@ export default function LLMPage() {
         </TabsList>
 
         <TabsContent value="profiles" className="mt-4">
+          {profilesError && (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+              <p className="text-destructive text-sm">模型配置读取失败：{profilesError}</p>
+              <Button size="sm" variant="outline" onClick={() => void load()}>
+                <RefreshCwIcon /> 重试
+              </Button>
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {profilesLoading &&
+              Array.from({ length: 3 }, (_, i) => (
+                <Card key={`profile-skeleton-${i}`} className="gap-0 py-4">
+                  <CardContent className="grid gap-3 px-4">
+                    <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
+                    <div className="h-3 w-1/2 animate-pulse rounded bg-muted" />
+                    <div className="h-8 animate-pulse rounded bg-muted/70" />
+                  </CardContent>
+                </Card>
+              ))}
             {profiles.map((p) => {
               const h = healthOf(p, health.get(p.id));
               return (
@@ -957,10 +1021,11 @@ export default function LLMPage() {
                       <Button
                         size="icon"
                         variant="outline"
-                        aria-label="删除配置"
+                        aria-label={`删除配置 ${p.name}`}
+                        disabled={p.is_default || deleting}
                         onClick={(e) => {
                           e.stopPropagation();
-                          void remove(p);
+                          setPendingDelete(p);
                         }}
                       >
                         <Trash2Icon className="text-destructive" />
@@ -970,7 +1035,7 @@ export default function LLMPage() {
                 </Card>
               );
             })}
-            {profiles.length === 0 && (
+            {!profilesLoading && !profilesError && profiles.length === 0 && (
               <div className="col-span-full rounded-lg border border-dashed p-10 text-center text-muted-foreground text-sm">
                 还没有模型配置，点击右上角「新建」创建第一个。
               </div>
@@ -984,7 +1049,36 @@ export default function LLMPage() {
       </Tabs>
 
       <ProfileSheet profile={editing} open={editOpen} onOpenChange={setEditOpen} onSaved={() => void load()} />
-      <PoolSheet open={poolOpen} onOpenChange={setPoolOpen} pool={pool} onReload={loadPool} />
+      <PoolSheet
+        open={poolOpen}
+        onOpenChange={setPoolOpen}
+        pool={pool}
+        error={poolError}
+        onReload={loadPool}
+      />
+      <AlertDialog open={!!pendingDelete} onOpenChange={(next) => !next && !deleting && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除模型配置「{pendingDelete?.name}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              删除后该配置将不能再被 Agent 或任务调用。已绑定它的 Agent 需要重新选择模型；此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmDelete();
+              }}
+            >
+              {deleting ? "删除中…" : "删除配置"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

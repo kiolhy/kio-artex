@@ -2,7 +2,16 @@
 
 import * as React from "react";
 
-import { BarChart3Icon, ChevronLeftIcon, ChevronRightIcon, Loader2Icon, SearchIcon, TerminalIcon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  BarChart3Icon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  Loader2Icon,
+  RefreshCwIcon,
+  SearchIcon,
+  TerminalIcon,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -59,11 +68,15 @@ export default function CommandsPage() {
   const [commands, setCommands] = React.useState<CommandRecord[]>([]);
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
+  const [listError, setListError] = React.useState("");
+  const [reloadKey, setReloadKey] = React.useState(0);
 
   // 各工具调用次数。弹窗打开时才拉取（多一次聚合查询，不必每次翻页都付）。
   const [statsOpen, setStatsOpen] = React.useState(false);
   const [stats, setStats] = React.useState<ToolStat[]>([]);
   const [statsLoading, setStatsLoading] = React.useState(false);
+  const [statsError, setStatsError] = React.useState("");
+  const [statsReloadKey, setStatsReloadKey] = React.useState(0);
 
   // Selected execution is rendered in a right-side detail sheet.
   const [selected, setSelected] = React.useState<CommandRecord | null>(null);
@@ -84,6 +97,7 @@ export default function CommandsPage() {
   React.useEffect(() => {
     let alive = true;
     setLoading(true);
+    setListError("");
     api
       .commands({ task: taskFilter || undefined, q: queryQ || undefined, page, size })
       .then((r) => {
@@ -91,31 +105,31 @@ export default function CommandsPage() {
         setCommands(r.commands ?? []);
         setTotal(r.total ?? 0);
       })
-      .catch(() => {
+      .catch((e) => {
         if (!alive) return;
-        setCommands([]);
-        setTotal(0);
+        setListError((e as Error).message || "工具执行记录读取失败");
       })
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, [page, size, queryQ, taskFilter]);
+  }, [page, size, queryQ, taskFilter, reloadKey]);
 
   // 统计跟随筛选条件走，和表格描述的是同一批记录（但不分页）。
   React.useEffect(() => {
     if (!statsOpen) return;
     let alive = true;
     setStatsLoading(true);
+    setStatsError("");
     api
       .commandStats({ task: taskFilter || undefined, q: queryQ || undefined })
       .then((r) => alive && setStats(r.stats ?? []))
-      .catch(() => alive && setStats([]))
+      .catch((e) => alive && setStatsError((e as Error).message || "统计数据读取失败"))
       .finally(() => alive && setStatsLoading(false));
     return () => {
       alive = false;
     };
-  }, [statsOpen, queryQ, taskFilter]);
+  }, [statsOpen, queryQ, taskFilter, statsReloadKey]);
 
   const statsTotal = stats.reduce((n, s) => n + s.total, 0);
   const statsErrors = stats.reduce((n, s) => n + s.errors, 0);
@@ -220,6 +234,22 @@ export default function CommandsPage() {
                       <Loader2Icon className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
                     </TableCell>
                   </TableRow>
+                ) : listError ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="py-12 text-center">
+                      <AlertCircleIcon className="text-destructive mx-auto size-6" />
+                      <p className="mt-2 text-sm font-medium">工具执行记录读取失败</p>
+                      <p className="text-muted-foreground mt-1 text-xs">{listError}</p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="mt-3"
+                        onClick={() => setReloadKey((v) => v + 1)}
+                      >
+                        <RefreshCwIcon /> 重试
+                      </Button>
+                    </TableCell>
+                  </TableRow>
                 ) : commands.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="py-12 text-center text-sm text-muted-foreground">
@@ -299,6 +329,20 @@ export default function CommandsPage() {
             <div className="py-10 text-center">
               <Loader2Icon className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
             </div>
+          ) : statsError ? (
+            <div className="py-8 text-center">
+              <AlertCircleIcon className="text-destructive mx-auto size-6" />
+              <p className="mt-2 text-sm font-medium">统计数据读取失败</p>
+              <p className="text-muted-foreground mt-1 text-xs">{statsError}</p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                onClick={() => setStatsReloadKey((v) => v + 1)}
+              >
+                <RefreshCwIcon /> 重试
+              </Button>
+            </div>
           ) : stats.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">暂无统计数据</div>
           ) : (
@@ -309,7 +353,9 @@ export default function CommandsPage() {
                     <div className="flex items-center gap-2">
                       <span className="truncate font-mono text-xs font-medium">{s.tool}</span>
                       {s.errors > 0 && (
-                        <span className="text-[11px] tabular-nums text-red-600 dark:text-red-400">失败 {s.errors}</span>
+                        <span className="text-xs tabular-nums text-red-600 dark:text-red-400">
+                          失败 {s.errors}
+                        </span>
                       )}
                     </div>
                     <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
@@ -321,7 +367,7 @@ export default function CommandsPage() {
                   </div>
                   <div className="text-right">
                     <div className="text-xs font-semibold tabular-nums">{s.total}</div>
-                    <div className="text-[11px] tabular-nums text-muted-foreground">
+                    <div className="text-xs tabular-nums text-muted-foreground">
                       {statsTotal > 0 ? ((s.total / statsTotal) * 100).toFixed(1) : "0.0"}%
                     </div>
                   </div>

@@ -51,8 +51,10 @@ type NotificationDelivery struct {
 	// 联合加载的渲染上下文，不进 JSON（由 server 层组装 DTO）。
 	Channel *NotificationChannel `json:"-"`
 	// FindingID/EventKind 从事件带出，供历史列表直接跳转漏洞详情。
-	FindingID int64  `json:"finding_id,string"`
-	EventKind string `json:"event_kind"`
+	FindingID  int64  `json:"finding_id,string"`
+	EventKind  string `json:"event_kind"`
+	TargetType string `json:"target_type"`
+	TargetID   int64  `json:"target_id"`
 	// ChannelName/ChannelKind 是列表展示用的冗余字段，省掉前端二次查询。
 	ChannelName string `json:"channel_name"`
 	ChannelKind string `json:"channel_kind"`
@@ -64,7 +66,7 @@ const notificationDeliveryCols = `d.id, d.event_id, d.channel_id, d.state, d.att
 // joinedDeliveryQuery 是投递行的统一读取形状：投递 + 事件快照 + 渠道配置。
 // 渲染一条消息三者缺一不可，分开查会写出三次往返。
 const joinedDeliveryQuery = `SELECT ` + notificationDeliveryCols + `,
-       e.snapshot, e.kind, e.finding_id,
+       e.snapshot, e.kind, e.finding_id, e.target_type, e.target_id,
        c.id, c.name, c.kind, c.enabled, c.config, c.mode, c.filter, c.rate_per_min
 FROM notification_deliveries d
 JOIN notification_events e ON e.id = d.event_id
@@ -72,18 +74,20 @@ JOIN notification_channels c ON c.id = d.channel_id`
 
 func scanNotificationDelivery(sc interface{ Scan(...any) error }) (*NotificationDelivery, error) {
 	var (
-		dl        NotificationDelivery
-		lastErr   sql.NullString
-		batchID   sql.NullInt64
-		sentAt    sql.NullTime
-		snapshot  []byte
-		eventKind string
-		channel   NotificationChannel
-		chEnabled bool
+		dl         NotificationDelivery
+		lastErr    sql.NullString
+		batchID    sql.NullInt64
+		sentAt     sql.NullTime
+		snapshot   []byte
+		eventKind  string
+		targetType sql.NullString
+		targetID   sql.NullInt64
+		channel    NotificationChannel
+		chEnabled  bool
 	)
 	if err := sc.Scan(&dl.ID, &dl.EventID, &dl.ChannelID, &dl.State, &dl.Attempts, &dl.NextAttemptAt,
 		&lastErr, &batchID, &dl.CreatedAt, &sentAt,
-		&snapshot, &eventKind, &dl.FindingID,
+		&snapshot, &eventKind, &dl.FindingID, &targetType, &targetID,
 		&channel.ID, &channel.Name, &channel.Kind, &chEnabled, &channel.Config, &channel.Mode, &channel.Filter, &channel.RatePerMin); err != nil {
 		return nil, err
 	}
@@ -96,6 +100,10 @@ func scanNotificationDelivery(sc interface{ Scan(...any) error }) (*Notification
 	}
 	dl.Snapshot = json.RawMessage(snapshot)
 	dl.EventKind = eventKind
+	dl.TargetType = targetType.String
+	if targetID.Valid {
+		dl.TargetID = targetID.Int64
+	}
 	dl.ChannelName = channel.Name
 	dl.ChannelKind = channel.Kind
 	channel.Enabled = &chEnabled

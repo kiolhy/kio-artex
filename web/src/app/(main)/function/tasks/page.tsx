@@ -44,11 +44,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-editor";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
-import { TaskTemplateControls } from "@/components/task-template-controls";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -122,9 +120,7 @@ import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
-  AssetInterceptRuleInput,
   ChatAttachment,
-  Company,
   DeleteTaskOptions,
   DeleteTaskResult,
   LLMProfile,
@@ -162,7 +158,6 @@ function appendUploads(desc: string, atts: ChatAttachment[]): string {
 // POLL_MS is the task-list refresh interval. Task state moves on the server (planner /
 // worker), so the list has to be pulled; 10s is plenty for status / 进度 / token 变化.
 const POLL_MS = 10_000;
-const MAX_SOURCE_TASKS = 8;
 
 // fmtTokens renders a compact token count (1234 → 1.2k, 2_000_000 → 2M).
 function fmtTokens(n: number): string {
@@ -205,11 +200,7 @@ type DeleteCounts = Omit<DeleteTaskResult, "deleted" | "cleanup_warning">;
 
 function deleteDetails(result: DeleteCounts): string[] {
   const details: string[] = [];
-  if (result.assets_deleted > 0) details.push(`删除资产 ${result.assets_deleted} 条`);
-  if (result.assets_detached > 0) details.push(`解除共享资产关联 ${result.assets_detached} 条`);
-  if (result.traffic_deleted > 0) details.push(`删除流量 ${result.traffic_deleted} 条`);
   if (result.files_deleted) details.push("删除任务文件");
-  if (result.findings_deleted > 0) details.push(`删除漏洞 ${result.findings_deleted} 条`);
   if (result.llm_records_deleted > 0) details.push(`删除 LLM 请求/响应记录 ${result.llm_records_deleted} 条`);
   return details;
 }
@@ -305,8 +296,11 @@ function compareTasks(left: Task, right: Task, field: TaskSortField, direction: 
 export default function TasksPage() {
   const [activeTab, setActiveTab] = React.useState("current");
   const [tasks, setTasks] = React.useState<Task[]>([]);
+  const [tasksLoaded, setTasksLoaded] = React.useState(false);
+  const [tasksError, setTasksError] = React.useState("");
   const [categories, setCategories] = React.useState<TaskCategory[]>([]);
   const [categoriesLoaded, setCategoriesLoaded] = React.useState(false);
+  const [categoriesError, setCategoriesError] = React.useState("");
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
@@ -458,13 +452,16 @@ export default function TasksPage() {
       .tasks()
       .then((r) => {
         const next = r.tasks.map((t) => (t.id === r.active ? { ...t, active: true } : t));
+        setTasksLoaded(true);
+        setTasksError("");
         const sig = JSON.stringify(next);
         if (sig === lastRef.current) return;
         lastRef.current = sig;
         setTasks(next);
       })
-      .catch(() => {
-        // Polling is best-effort; the next interval retries automatically.
+      .catch((error) => {
+        // Keep the last successful table while a transient refresh fails.
+        setTasksError((error as Error).message || "执行任务列表读取失败");
       });
   }, []);
 
@@ -474,9 +471,10 @@ export default function TasksPage() {
       .then((next) => {
         setCategories(next);
         setCategoriesLoaded(true);
+        setCategoriesError("");
       })
-      .catch(() => {
-        // Category management remains retryable without blocking the task list.
+      .catch((error) => {
+        setCategoriesError((error as Error).message || "任务分类读取失败");
       });
   }, []);
 
@@ -611,16 +609,12 @@ export default function TasksPage() {
     [load],
   );
 
-  // deleteTasks 逐个删除所选任务:后端没有批量接口,且单次删除会连带清理资产/流量/文件,
+  // deleteTasks 逐个删除所选任务:后端没有批量接口,且单次删除会连带清理文件与 LLM 记录,
   // 串行执行以免一次性打爆后端;成功的从选中集移除,失败的保留以便重试。
   const deleteTasks = React.useCallback(
     async (ids: string[], options: DeleteTaskOptions, onProgress: (done: number) => void) => {
       const total: DeleteCounts = {
-        assets_deleted: 0,
-        assets_detached: 0,
-        traffic_deleted: 0,
         files_deleted: false,
-        findings_deleted: 0,
         llm_records_deleted: 0,
       };
       const deleted: string[] = [];
@@ -630,11 +624,7 @@ export default function TasksPage() {
       for (const id of ids) {
         try {
           const r = await api.deleteTask(id, options);
-          total.assets_deleted += r.assets_deleted;
-          total.assets_detached += r.assets_detached;
-          total.traffic_deleted += r.traffic_deleted;
           total.files_deleted = total.files_deleted || r.files_deleted;
-          total.findings_deleted += r.findings_deleted;
           total.llm_records_deleted += r.llm_records_deleted;
           if (r.cleanup_warning) warnings.push(`#${id}：${r.cleanup_warning}`);
           deleted.push(id);
@@ -821,7 +811,11 @@ export default function TasksPage() {
                   </SelectGroup>
                 </SelectContent>
               </Select>
-              <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+              <Select
+                value={categoryFilter}
+                onValueChange={setCategoryFilter}
+                disabled={!!categoriesError}
+              >
                 <SelectTrigger className="w-40">
                   <SelectValue placeholder="任务分类" />
                 </SelectTrigger>
@@ -837,6 +831,16 @@ export default function TasksPage() {
                   </SelectGroup>
                 </SelectContent>
               </Select>
+              {categoriesError && (
+                <div className="flex items-center gap-1 text-xs text-destructive">
+                  <span className="max-w-48 truncate" title={categoriesError}>
+                    分类读取失败
+                  </span>
+                  <Button size="sm" variant="ghost" onClick={loadCategories}>
+                    重试
+                  </Button>
+                </div>
+              )}
               <span className="text-muted-foreground text-xs tabular-nums">
                 {filtered.length}/{tasks.length} 条
               </span>
@@ -912,7 +916,28 @@ export default function TasksPage() {
               />
             </div>
 
-            {tasks.length === 0 ? (
+            {tasksError && tasks.length > 0 && (
+              <div className="mx-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 lg:mx-6 dark:text-amber-300">
+                <span className="min-w-0 flex-1">列表刷新失败，正在显示上次读取结果：{tasksError}</span>
+                <Button size="sm" variant="ghost" onClick={load}>
+                  重试
+                </Button>
+              </div>
+            )}
+            {tasks.length === 0 && tasksError ? (
+              <div className="mx-4 flex flex-col items-center gap-2 rounded-lg border border-destructive/30 py-16 text-center lg:mx-6">
+                <p className="text-sm font-medium">执行任务列表读取失败</p>
+                <p className="text-muted-foreground max-w-md text-xs">{tasksError}</p>
+                <Button size="sm" variant="outline" onClick={load}>
+                  重试
+                </Button>
+              </div>
+            ) : tasks.length === 0 && !tasksLoaded ? (
+              <div className="text-muted-foreground mx-4 flex items-center justify-center gap-2 rounded-lg border border-dashed py-20 text-sm lg:mx-6">
+                <Loader2Icon className="size-4 animate-spin" />
+                正在读取任务…
+              </div>
+            ) : tasks.length === 0 ? (
               <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
                 暂无任务，点击右上角「新建任务」开始。
               </div>
@@ -950,9 +975,6 @@ export default function TasksPage() {
                       onSort={sortTasksBy}
                     />
                     <TableHead className="text-center">目标进度</TableHead>
-                    <TableHead className="text-center" title="严重 / 高 / 中 / 低">
-                      漏洞 <span className="text-muted-foreground font-normal">严/高/中/低</span>
-                    </TableHead>
                     <TableHead className="text-center">运行中 Worker</TableHead>
                     <SortableTaskHead
                       field="created"
@@ -1219,27 +1241,6 @@ const TaskRow = React.memo(function TaskRow({
         )}
       </TableCell>
       <TableCell className="text-center text-xs tabular-nums">
-        {(() => {
-          const f = task.findings;
-          const total = f ? f.critical + f.high + f.medium + f.low : 0;
-          if (!f || total === 0) return <span className="text-muted-foreground">0</span>;
-          const seg = (n: number, cls: string) => (
-            <span className={n > 0 ? cls : "text-muted-foreground"}>{n}</span>
-          );
-          return (
-            <span className="font-medium whitespace-nowrap" title="严重 / 高 / 中 / 低">
-              {seg(f.critical, "text-rose-600 dark:text-rose-400")}
-              <span className="text-muted-foreground">/</span>
-              {seg(f.high, "text-red-600 dark:text-red-400")}
-              <span className="text-muted-foreground">/</span>
-              {seg(f.medium, "text-amber-600 dark:text-amber-400")}
-              <span className="text-muted-foreground">/</span>
-              {seg(f.low, "text-slate-600 dark:text-slate-400")}
-            </span>
-          );
-        })()}
-      </TableCell>
-      <TableCell className="text-center text-xs tabular-nums">
         {task.in_flight && task.in_flight > 0 ? (
           <span className="text-foreground font-medium">{task.in_flight}</span>
         ) : (
@@ -1491,7 +1492,7 @@ function ArchiveConfirmDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>{count === 1 ? "归档任务" : `归档 ${count} 个任务`}</AlertDialogTitle>
           <AlertDialogDescription className="[overflow-wrap:anywhere]">
-            归档会停止任务调度，将图谱、LLM 历史、文件以及独占资产和流量压缩到本地冷存储。归档完成后可从“已归档”中还原。
+            归档会停止任务调度，将图谱、LLM 历史与文件压缩到本地冷存储。归档完成后可从“已归档”中还原。
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -2012,18 +2013,12 @@ function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
 }
 
 const emptyDeleteOptions = (): DeleteTaskOptions => ({
-  delete_assets: false,
-  delete_traffic: false,
   delete_files: false,
-  delete_findings: false,
   delete_llm_records: false,
 });
 
 const deleteOptionKeys: (keyof DeleteTaskOptions)[] = [
-  "delete_assets",
-  "delete_traffic",
   "delete_files",
-  "delete_findings",
   "delete_llm_records",
 ];
 
@@ -2055,10 +2050,7 @@ function DeleteOptionFields({
 
   const updateAllOptions = (checked: boolean) => {
     onOptionsChange({
-      delete_assets: checked,
-      delete_traffic: checked,
       delete_files: checked,
-      delete_findings: checked,
       delete_llm_records: checked,
     });
   };
@@ -2075,29 +2067,7 @@ function DeleteOptionFields({
           />
           <FieldContent>
             <FieldLabel htmlFor={`delete-all-${idPrefix}`}>全部删除</FieldLabel>
-            <FieldDescription>选中下方全部关联数据，包括资产、流量、文件、漏洞和 LLM 请求/响应记录。</FieldDescription>
-          </FieldContent>
-        </Field>
-        <Field orientation="horizontal">
-          <Checkbox
-            id={`delete-assets-${idPrefix}`}
-            checked={options.delete_assets}
-            onCheckedChange={(checked) => updateOption("delete_assets", checked === true)}
-          />
-          <FieldContent>
-            <FieldLabel htmlFor={`delete-assets-${idPrefix}`}>关联资产</FieldLabel>
-            <FieldDescription>删除仅属于该任务的资产；共享资产只解除当前任务关联。</FieldDescription>
-          </FieldContent>
-        </Field>
-        <Field orientation="horizontal">
-          <Checkbox
-            id={`delete-traffic-${idPrefix}`}
-            checked={options.delete_traffic}
-            onCheckedChange={(checked) => updateOption("delete_traffic", checked === true)}
-          />
-          <FieldContent>
-            <FieldLabel htmlFor={`delete-traffic-${idPrefix}`}>关联流量</FieldLabel>
-            <FieldDescription>按关联资产的精确主机名删除；仍被其他任务引用的共享主机流量会保留。</FieldDescription>
+            <FieldDescription>选中下方全部关联数据，包括任务文件和 LLM 请求/响应记录。</FieldDescription>
           </FieldContent>
         </Field>
         <Field orientation="horizontal">
@@ -2109,17 +2079,6 @@ function DeleteOptionFields({
           <FieldContent>
             <FieldLabel htmlFor={`delete-files-${idPrefix}`}>任务文件</FieldLabel>
             <FieldDescription>删除该任务工作目录中的上传文件、命令输出和其他产物。</FieldDescription>
-          </FieldContent>
-        </Field>
-        <Field orientation="horizontal">
-          <Checkbox
-            id={`delete-findings-${idPrefix}`}
-            checked={options.delete_findings}
-            onCheckedChange={(checked) => updateOption("delete_findings", checked === true)}
-          />
-          <FieldContent>
-            <FieldLabel htmlFor={`delete-findings-${idPrefix}`}>关联漏洞</FieldLabel>
-            <FieldDescription>永久删除该任务产生的独立漏洞记录与漏洞报告。</FieldDescription>
           </FieldContent>
         </Field>
         <Field orientation="horizontal">
@@ -2187,7 +2146,7 @@ function DeleteTaskDialog({
             ) : (
               "该任务"
             )}
-            的执行记录与探索链路将被永久删除。
+            的执行记录与 Agent 活动将被永久删除。
           </AlertDialogDescription>
         </AlertDialogHeader>
         <DeleteOptionFields idPrefix={task.id} options={options} onOptionsChange={setOptions} disabled={deleting} />
@@ -2331,7 +2290,7 @@ function BulkDeleteTasksDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>确认删除所选 {ids.length} 个任务？</AlertDialogTitle>
           <AlertDialogDescription>
-            这些任务的执行记录与探索链路将被永久删除，下方清理选项对所选任务统一生效。
+            这些任务的执行记录与 Agent 活动将被永久删除，下方清理选项对所选任务统一生效。
           </AlertDialogDescription>
         </AlertDialogHeader>
         <div className="text-muted-foreground flex flex-wrap gap-1 text-xs">
@@ -2366,73 +2325,6 @@ function BulkDeleteTasksDialog({
 // 描述/目标 held by the page component every keystroke re-rendered the whole task table
 // behind the drawer (plus its sticky column and 20 AlertDialog trees), which showed up as
 // input lag. Now typing only re-renders the drawer.
-function SourceTaskPicker({
-  tasks,
-  value,
-  onValueChange,
-  portalContainer,
-}: {
-  tasks: Task[];
-  value: string[];
-  onValueChange: (value: string[]) => void;
-  portalContainer?: React.RefObject<HTMLElement | null>;
-}) {
-  const tasksByID = React.useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
-  const taskIDs = React.useMemo(() => tasks.map((task) => task.id), [tasks]);
-  const atLimit = value.length >= MAX_SOURCE_TASKS;
-
-  const handleValueChange = (next: string[]) => {
-    onValueChange(next.slice(0, MAX_SOURCE_TASKS));
-  };
-
-  return (
-    <Combobox
-      items={taskIDs}
-      itemToStringValue={(taskID) => {
-        const task = tasksByID.get(taskID);
-        return task ? `${task.id} ${task.description} ${task.goal}` : taskID;
-      }}
-      multiple
-      value={value}
-      onValueChange={handleValueChange}
-    >
-      <ComboboxChips>
-        <ComboboxValue>
-          {value.map((taskID) => (
-            <ComboboxChip key={taskID}>#{taskID}</ComboboxChip>
-          ))}
-        </ComboboxValue>
-        <ComboboxChipsInput
-          id="source-tasks"
-          placeholder={atLimit ? `最多关联 ${MAX_SOURCE_TASKS} 个任务` : "搜索任务 ID、描述或目标"}
-          disabled={atLimit}
-        />
-      </ComboboxChips>
-      <ComboboxContent portalContainer={portalContainer}>
-        <ComboboxEmpty>没有匹配的任务</ComboboxEmpty>
-        <ComboboxList>
-          {(taskID) => {
-            const task = tasksByID.get(taskID);
-            return (
-              <ComboboxItem key={taskID} value={taskID} disabled={atLimit && !value.includes(taskID)}>
-                <div className="flex min-w-0 flex-1 items-center gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">
-                      #{taskID} · {task?.description ?? "未知任务"}
-                    </p>
-                    {task?.goal && <p className="text-muted-foreground truncate text-xs">{task.goal}</p>}
-                  </div>
-                  {task && <StatusBadge domain="task" value={task.status} />}
-                </div>
-              </ComboboxItem>
-            );
-          }}
-        </ComboboxList>
-      </ComboboxContent>
-    </Combobox>
-  );
-}
-
 // CategoryPicker 是新建任务里的单选分类选择器：可搜索已有分类；输入库里没有的名称后
 // 回车（或点下拉里的「创建」）即时新建分类并选中，选中项以可移除的 tag 展示。分类是
 // 全局资源，这里即时创建与「分类管理」里手动新建等价。只允许一个分类。
@@ -2552,90 +2444,6 @@ function CategoryPicker({
           ) : (
             <div className="px-2 py-2 text-sm text-muted-foreground">输入名称以搜索或创建分类</div>
           ))}
-      </ComboboxContent>
-    </Combobox>
-  );
-}
-
-const COMPANY_SCOPE_LABELS: Record<string, string> = {
-  domain: "域名",
-  ip: "IP",
-  cidr: "CIDR",
-  icp: "ICP",
-  keyword: "关键词",
-};
-
-function companyScopeSummary(company: Company): string {
-  const rows = company.scope ?? [];
-  if (rows.length === 0) return "未配置资产范围";
-  const preview = rows.slice(0, 3).map((row) => {
-    const value = row.raw || row.value || row.domain || row.net || "";
-    return `${COMPANY_SCOPE_LABELS[row.kind] ?? row.kind}：${value}`;
-  });
-  return `${preview.join(" · ")}${rows.length > preview.length ? ` · 另 ${rows.length - preview.length} 条` : ""}`;
-}
-
-function CompanyPicker({
-  companies,
-  value,
-  onValueChange,
-  portalContainer,
-}: {
-  companies: Company[];
-  value: number[];
-  onValueChange: (value: number[]) => void;
-  portalContainer?: React.RefObject<HTMLElement | null>;
-}) {
-  const companiesByID = React.useMemo(
-    () => new Map(companies.map((company) => [String(company.id), company])),
-    [companies],
-  );
-  const companyIDs = React.useMemo(() => companies.map((company) => String(company.id)), [companies]);
-  const selectedIDs = React.useMemo(() => value.map(String), [value]);
-
-  return (
-    <Combobox
-      items={companyIDs}
-      itemToStringValue={(companyID) => {
-        const company = companiesByID.get(companyID);
-        return company ? `${company.name} ${companyScopeSummary(company)}` : companyID;
-      }}
-      multiple
-      value={selectedIDs}
-      onValueChange={(next) => onValueChange(next.map(Number).filter(Number.isFinite))}
-    >
-      <ComboboxChips>
-        <ComboboxValue>
-          {selectedIDs.map((companyID) => (
-            <ComboboxChip key={companyID}>{companiesByID.get(companyID)?.name ?? `企业 #${companyID}`}</ComboboxChip>
-          ))}
-        </ComboboxValue>
-        <ComboboxChipsInput id="task-companies" placeholder="搜索企业名称或资产范围" />
-      </ComboboxChips>
-      <ComboboxContent portalContainer={portalContainer}>
-        <ComboboxEmpty>没有匹配的企业</ComboboxEmpty>
-        <ComboboxList>
-          {(companyID) => {
-            const company = companiesByID.get(companyID);
-            return (
-              <ComboboxItem key={companyID} value={companyID}>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate font-medium">{company?.name ?? `企业 #${companyID}`}</span>
-                    <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-                      {company?.asset_count ?? 0} 个资产
-                    </span>
-                  </div>
-                  {company && (
-                    <span className="text-muted-foreground truncate text-xs" title={companyScopeSummary(company)}>
-                      {companyScopeSummary(company)}
-                    </span>
-                  )}
-                </div>
-              </ComboboxItem>
-            );
-          }}
-        </ComboboxList>
       </ComboboxContent>
     </Combobox>
   );
@@ -3076,18 +2884,12 @@ function CreateTaskSheet({
   const [categoryID, setCategoryID] = React.useState<number | undefined>(undefined);
   const [description, setDescription] = React.useState("");
   const [goal, setGoal] = React.useState("");
-  const [selectedTemplateID, setSelectedTemplateID] = React.useState<number | null>(null);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
-  const [companies, setCompanies] = React.useState<Company[]>([]);
-  const [sourceTaskIDs, setSourceTaskIDs] = React.useState<string[]>([]);
-  const [companyIDs, setCompanyIDs] = React.useState<number[]>([]);
   const [llmProfileIDs, setLLMProfileIDs] = React.useState<string[]>([]);
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
-  const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
-  const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -3101,10 +2903,6 @@ function CreateTaskSheet({
       .llmProfiles()
       .then(setProfiles)
       .catch(() => setProfiles([]));
-    api
-      .companies()
-      .then(setCompanies)
-      .catch(() => setCompanies([]));
   }, []);
 
   // pickFiles uploads the chosen files into this draft's staging dir and appends their
@@ -3134,10 +2932,6 @@ function CreateTaskSheet({
       toast.error("请填写描述与目标");
       return;
     }
-    if (sourceTaskIDs.length > MAX_SOURCE_TASKS) {
-      toast.error(`最多关联 ${MAX_SOURCE_TASKS} 个来源任务`);
-      return;
-    }
     setCreating(true);
     try {
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
@@ -3148,30 +2942,19 @@ function CreateTaskSheet({
         description: description.trim(),
         goal: goal.trim(),
         llmProfileIds: llmProfileIDs.map(Number),
-        sourceTaskIds: sourceTaskIDs,
-        companyIds: companyIDs,
         timeoutSeconds: timeoutSec,
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
-        coverageEnabled,
-        interceptRules: interceptRules
-          .map((r) => ({ ...r, pattern: r.pattern.trim() }))
-          .filter((r) => r.pattern !== ""),
       });
       toast.success("任务已创建");
       setName("");
       setCategoryID(undefined);
       setDescription("");
       setGoal("");
-      setSelectedTemplateID(null);
-      setSourceTaskIDs([]);
-      setCompanyIDs([]);
       setLLMProfileIDs([]);
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
-      setCoverageEnabled(true);
-      setInterceptRules([]);
       setUploadCount(0);
       draftIdRef.current = "";
       setOpen(false);
@@ -3199,32 +2982,16 @@ function CreateTaskSheet({
       >
         <SheetHeader className="border-b p-6">
           <SheetTitle>新建任务</SheetTitle>
-          <SheetDescription>填写测试对象与目标，高级参数可按需展开。</SheetDescription>
+          <SheetDescription>填写任务描述与目标，高级参数可按需展开。</SheetDescription>
         </SheetHeader>
 
         <div className="flex-1 overflow-y-auto p-6">
           <div className="grid gap-5">
-            <TaskTemplateControls
-              description={description}
-              goal={goal}
-              categoryID={categoryID}
-              interceptRules={interceptRules}
-              selectedTemplateID={selectedTemplateID}
-              onSelectedTemplateIDChange={setSelectedTemplateID}
-              onApply={(template) => {
-                setDescription(template.description);
-                setGoal(template.goal);
-                setCategoryID(template.category_id ?? undefined);
-                setInterceptRules(template.intercept_rules ?? []);
-                setUploadCount(0);
-              }}
-              portalContainer={sheetContentRef}
-            />
             <div className="grid gap-2">
               <Label htmlFor="name">名称（可选）</Label>
               <Input
                 id="name"
-                placeholder="给任务起个便于识别的名字，例如：Acme 官网渗透"
+                placeholder="给任务起个便于识别的名字"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
               />
@@ -3245,7 +3012,7 @@ function CreateTaskSheet({
               <Textarea
                 id="description"
                 className="min-h-32"
-                placeholder="测试对象与背景，例如：测试 example.com 这个站点"
+                placeholder="任务背景与具体说明，例如：整理本周工作周报并提炼重点"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
@@ -3280,44 +3047,11 @@ function CreateTaskSheet({
               <Textarea
                 id="goal"
                 className="min-h-32"
-                placeholder="要达成什么，例如：拿下后台管理权限、获取服务器权限"
+                placeholder="要达成什么，例如：产出一份结构清晰的周报总结"
                 value={goal}
                 onChange={(e) => setGoal(e.target.value)}
               />
             </div>
-            <Field>
-              <FieldLabel htmlFor="source-tasks">关联任务</FieldLabel>
-              <SourceTaskPicker
-                tasks={tasks}
-                value={sourceTaskIDs}
-                onValueChange={setSourceTaskIDs}
-                portalContainer={sheetContentRef}
-              />
-              <FieldDescription>
-                最多关联 {MAX_SOURCE_TASKS}{" "}
-                个任务。实时只读继承所选任务的持久化黑板、资产范围及相关流量；新任务写入独立黑板。
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="task-companies">关联企业资产范围</FieldLabel>
-              <CompanyPicker
-                companies={companies}
-                value={companyIDs}
-                onValueChange={setCompanyIDs}
-                portalContainer={sheetContentRef}
-              />
-              <FieldDescription>
-                创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
-                作为范围上下文；不会自动生成意图或强制改变执行目标。
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="task-intercept-rules">任务级资产拦截 / 允许规则（可选）</FieldLabel>
-              <AssetInterceptRulesEditor value={interceptRules} onChange={setInterceptRules} />
-              <FieldDescription>
-                仅对本任务生效，不写入全局规则。判定顺序：先按「拦截」规则（含全局）匹配，命中即禁止测试；未命中且本任务配置了「允许」规则时，须命中某条允许规则才放行，否则同样不允许测试；未配置任何允许规则则不启用白名单。
-              </FieldDescription>
-            </Field>
             <Field>
               <FieldLabel htmlFor="llm-profiles">LLM 配置链</FieldLabel>
               <TaskLLMProfileChain
@@ -3380,21 +3114,7 @@ function CreateTaskSheet({
                   </label>
                   <p className="text-muted-foreground text-xs">
                     开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner
-                    接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
-                  </p>
-                </div>
-                <div className="grid gap-2">
-                  <label htmlFor="coverage-enabled" className="flex items-center gap-2 text-sm">
-                    <Checkbox
-                      id="coverage-enabled"
-                      checked={coverageEnabled}
-                      onCheckedChange={(v) => setCoverageEnabled(!!v)}
-                    />
-                    资产覆盖度功能
-                  </label>
-                  <p className="text-muted-foreground text-xs">
-                    默认开启：计算并展示测试覆盖度、态势图显示测试进度、自动累积测试范围。关闭后不再计算/展示覆盖度，
-                    态势图仅展示资产不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业资产范围」。
+                    接手判定/补充。目标明确、可一步到位的简单任务推荐开启；关闭则走标准的先规划再执行。
                   </p>
                 </div>
               </CollapsibleContent>

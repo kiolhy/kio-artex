@@ -110,6 +110,7 @@ func TestNotificationAssetNamesResolvesAndPreservesOrder(t *testing.T) {
 func TestRecordNotificationEventTxUnwindsOnFailure(t *testing.T) {
 	d := notifyTestDB(t)
 	ctx := context.Background()
+	const sentinelFindingID int64 = 9223372036854775807
 
 	// 防御性清理：若历史运行留下过这个约束，先摘掉。
 	if _, err := d.Exec(`ALTER TABLE notification_events DROP CONSTRAINT IF EXISTS notify_test_never`); err != nil {
@@ -124,10 +125,12 @@ func TestRecordNotificationEventTxUnwindsOnFailure(t *testing.T) {
 
 	// NOT VALID：只约束此后写入的行，不去校验库里已有的历史事件
 	// （否则存量行违规会导致约束加不上）。
-	if _, err := tx.ExecContext(ctx, `ALTER TABLE notification_events ADD CONSTRAINT notify_test_never CHECK (false) NOT VALID`); err != nil {
+	// 约束只命中本用例的哨兵 finding_id，避免后台通知写入并发命中该
+	// 临时 DDL，导致无关用例偶发失败。
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE notification_events ADD CONSTRAINT notify_test_never CHECK (finding_id IS DISTINCT FROM $1) NOT VALID`, sentinelFindingID); err != nil {
 		t.Fatalf("加临时约束失败: %v", err)
 	}
-	if RecordNotificationEventTx(ctx, tx, notify.EventFindingCreated, 1, notify.Snapshot{Severity: "high"}) {
+	if RecordNotificationEventTx(ctx, tx, notify.EventFindingCreated, sentinelFindingID, notify.Snapshot{Severity: "high"}) {
 		t.Fatal("在必然失败的约束下仍报告写入成功")
 	}
 	// 关键断言：事务还能用。

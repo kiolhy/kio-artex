@@ -107,7 +107,7 @@ func (d *DB) CreateFindingRetest(ctx context.Context, findingID int64, notes str
 		return nil, nil, false, err
 	}
 	r, err = scanRetest(tx.QueryRowContext(ctx, `INSERT INTO finding_retests(finding_id,conversation_id,notes,snapshot) VALUES ($1,$2,$3,$4) RETURNING `+retestCols,
-		findingID, c.ID, strings.TrimSpace(notes), snapshot))
+		findingID, c.ID, strings.TrimSpace(notes), string(snapshot)))
 	if err != nil {
 		return nil, nil, false, err
 	}

@@ -2,16 +2,19 @@
 
 import * as React from "react";
 import {
+  AlertCircleIcon,
   RadioIcon,
   SearchIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   Loader2Icon,
+  RefreshCwIcon,
   XIcon,
   Trash2Icon,
   CopyIcon,
   CheckIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   AlertDialog,
@@ -85,8 +88,10 @@ function CopyButton({ text }: { text: string }) {
   const disabled = !text;
   const copy = async () => {
     if (disabled) return;
+    let copiedOK = false;
     try {
       await navigator.clipboard.writeText(text);
+      copiedOK = true;
     } catch {
       // navigator.clipboard 在非安全上下文(如 http 局域网)不可用，回退到 execCommand。
       const ta = document.createElement("textarea");
@@ -95,8 +100,16 @@ function CopyButton({ text }: { text: string }) {
       ta.style.opacity = "0";
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand("copy"); } catch { /* 忽略：不支持则静默 */ }
+      try {
+        copiedOK = document.execCommand("copy");
+      } catch {
+        copiedOK = false;
+      }
       document.body.removeChild(ta);
+    }
+    if (!copiedOK) {
+      toast.error("复制失败，请手动选择文本");
+      return;
     }
     setCopied(true);
     if (timer.current) clearTimeout(timer.current);
@@ -134,11 +147,18 @@ export default function LLMRecordsPage() {
   // backend records nothing.
   const [recEnabled, setRecEnabled] = React.useState(false);
   const [recBusy, setRecBusy] = React.useState(false);
+  const [recSettingsLoaded, setRecSettingsLoaded] = React.useState(false);
+  const [recSettingsError, setRecSettingsError] = React.useState("");
+  const [recSettingsReloadTick, setRecSettingsReloadTick] = React.useState(0);
+  const [recordsError, setRecordsError] = React.useState("");
+  const [tasksError, setTasksError] = React.useState("");
 
   // Inline detail panel (Burp-style split, not a dialog)
   const [selected, setSelected] = React.useState<LLMRecordItem | null>(null);
   const [detail, setDetail] = React.useState<LLMRecordDetail | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
+  const [detailError, setDetailError] = React.useState("");
+  const [detailReloadTick, setDetailReloadTick] = React.useState(0);
   // 归一化视图 / HTTP 原文视图。原文是排查 provider 侧问题的唯一依据：归一化视图
   // 不含工具 schema，响应里也没有 tool_use 块。
   const [rawView, setRawView] = React.useState(false);
@@ -165,12 +185,17 @@ export default function LLMRecordsPage() {
   // Load recording toggle state on mount.
   React.useEffect(() => {
     let alive = true;
+    setRecSettingsLoaded(false);
+    setRecSettingsError("");
     api
       .settings()
       .then((s) => { if (alive) setRecEnabled(!!s.llm_record); })
-      .catch(() => {});
+      .catch((error) => {
+        if (alive) setRecSettingsError((error as Error).message || "录制开关读取失败");
+      })
+      .finally(() => { if (alive) setRecSettingsLoaded(true); });
     return () => { alive = false; };
-  }, []);
+  }, [recSettingsReloadTick]);
 
   const toggleRecording = async (on: boolean) => {
     setRecBusy(true);
@@ -178,8 +203,12 @@ export default function LLMRecordsPage() {
     try {
       const s = await api.setSettings({ llm_record: on });
       setRecEnabled(!!s.llm_record);
-    } catch {
+      setRecSettingsError("");
+    } catch (error) {
       setRecEnabled(!on); // revert on failure
+      const message = (error as Error).message || "未知错误";
+      setRecSettingsError(message);
+      toast.error(`录制开关更新失败：${message}`);
     } finally {
       setRecBusy(false);
     }
@@ -200,6 +229,8 @@ export default function LLMRecordsPage() {
   React.useEffect(() => {
     let alive = true;
     setLoading(true);
+    setRecordsError("");
+    setTasksError("");
     api
       .llmRecords({ model: model || undefined, session: sessionQ || undefined, task: pickedTask || undefined, page, size })
       .then((r) => {
@@ -207,12 +238,23 @@ export default function LLMRecordsPage() {
         setRecords(r.records ?? []);
         setTotal(r.total ?? 0);
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (alive) {
+          setRecords([]);
+          setTotal(0);
+          setRecordsError((error as Error).message || "LLM 调用记录读取失败");
+        }
+      })
       .finally(() => alive && setLoading(false));
     api
       .llmTasks()
       .then((r) => { if (alive) setTasks(r.tasks ?? []); })
-      .catch(() => {});
+      .catch((error) => {
+        if (alive) {
+          setTasks([]);
+          setTasksError((error as Error).message || "任务筛选项读取失败");
+        }
+      });
     return () => { alive = false; };
   }, [page, size, sessionQ, model, pickedTask, reloadTick]);
 
@@ -222,6 +264,7 @@ export default function LLMRecordsPage() {
     api
       .llmRecordsDeleteTask(pickedTask)
       .then(() => {
+        toast.success("已删除该任务的 LLM 调用记录");
         setDeleteOpen(false);
         setSelected(null);
         setDetail(null);
@@ -229,7 +272,9 @@ export default function LLMRecordsPage() {
         setPage(0);
         setReloadTick((t) => t + 1);
       })
-      .catch(() => {})
+      .catch((error) => {
+        toast.error(`删除失败：${(error as Error).message}`);
+      })
       .finally(() => setDeleting(false));
   };
 
@@ -242,13 +287,16 @@ export default function LLMRecordsPage() {
     let alive = true;
     setDetailLoading(true);
     setDetail(null);
+    setDetailError("");
     api
       .llmRecordDetail(selected.id)
       .then((d) => { if (alive) setDetail(d); })
-      .catch(() => {})
+      .catch((error) => {
+        if (alive) setDetailError((error as Error).message || "记录详情读取失败");
+      })
       .finally(() => { if (alive) setDetailLoading(false); });
     return () => { alive = false; };
-  }, [selected]);
+  }, [selected, detailReloadTick]);
 
   const totalPages = Math.max(1, Math.ceil(total / size));
   const rangeStart = total === 0 ? 0 : page * size + 1;
@@ -332,7 +380,7 @@ export default function LLMRecordsPage() {
             size="sm"
             checked={recEnabled}
             onCheckedChange={toggleRecording}
-            disabled={recBusy}
+            disabled={recBusy || !recSettingsLoaded || !!recSettingsError}
           />
           <label
             htmlFor="llm-rec-toggle"
@@ -341,7 +389,7 @@ export default function LLMRecordsPage() {
               recEnabled ? "text-foreground" : "text-muted-foreground",
             )}
           >
-            {recEnabled ? "录制中" : "已关闭"}
+            {!recSettingsLoaded ? "读取中" : recSettingsError ? "状态未知" : recEnabled ? "录制中" : "已关闭"}
           </label>
         </div>
 
@@ -373,6 +421,35 @@ export default function LLMRecordsPage() {
         </div>
       </div>
 
+      {recSettingsError && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2">
+          <p className="text-destructive flex items-center gap-2 text-sm">
+            <AlertCircleIcon className="size-4 shrink-0" />
+            录制开关读取失败，已禁止修改以免覆盖现有设置：{recSettingsError}
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!recSettingsLoaded}
+            onClick={() => setRecSettingsReloadTick((t) => t + 1)}
+          >
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+
+      {tasksError && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2">
+          <p className="text-amber-700 dark:text-amber-300 flex items-center gap-2 text-sm">
+            <AlertCircleIcon className="size-4 shrink-0" />
+            任务筛选项读取失败，记录列表仍可使用：{tasksError}
+          </p>
+          <Button size="sm" variant="outline" onClick={() => setReloadTick((t) => t + 1)}>
+            <RefreshCwIcon /> 重试
+          </Button>
+        </div>
+      )}
+
       {/* History table + inline detail (Burp-style split) */}
       <div className="flex h-[calc(100vh-13rem)] min-h-0 flex-col gap-3">
         <Card className="flex min-h-0 flex-1 flex-col overflow-hidden py-0">
@@ -395,6 +472,18 @@ export default function LLMRecordsPage() {
                   <TableRow>
                     <TableCell colSpan={8} className="py-12 text-center">
                       <Loader2Icon className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
+                    </TableCell>
+                  </TableRow>
+                ) : recordsError ? (
+                  <TableRow>
+                    <TableCell colSpan={8} className="py-10 text-center">
+                      <div className="mx-auto flex max-w-md flex-col items-center gap-3">
+                        <AlertCircleIcon className="size-5 text-destructive" />
+                        <p className="text-destructive text-sm">LLM 调用记录读取失败：{recordsError}</p>
+                        <Button size="sm" variant="outline" onClick={() => setReloadTick((t) => t + 1)}>
+                          <RefreshCwIcon /> 重试
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ) : records.length === 0 ? (
@@ -507,9 +596,18 @@ export default function LLMRecordsPage() {
               </Button>
             </div>
             {/* Request / Response split */}
+            {detailError ? (
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+                <AlertCircleIcon className="size-5 text-destructive" />
+                <p className="text-destructive text-sm">记录详情读取失败：{detailError}</p>
+                <Button size="sm" variant="outline" onClick={() => setDetailReloadTick((t) => t + 1)}>
+                  <RefreshCwIcon /> 重试
+                </Button>
+              </div>
+            ) : (
             <div className="grid min-h-0 flex-1 grid-cols-2 divide-x">
               <div className="flex min-h-0 min-w-0 flex-col">
-                <div className="flex items-center gap-2 border-b py-0.5 pr-1.5 pl-3 text-[11px] font-medium text-muted-foreground">
+                <div className="flex items-center gap-2 border-b py-0.5 pr-1.5 pl-3 text-xs font-medium text-muted-foreground">
                   <span>Request{showRaw && " · 原文"}</span>
                   <CopyButton text={reqText || ""} />
                 </div>
@@ -527,7 +625,7 @@ export default function LLMRecordsPage() {
                 </div>
               </div>
               <div className="flex min-h-0 min-w-0 flex-col">
-                <div className="flex items-center gap-2 border-b py-0.5 pr-1.5 pl-3 text-[11px] font-medium text-muted-foreground">
+                <div className="flex items-center gap-2 border-b py-0.5 pr-1.5 pl-3 text-xs font-medium text-muted-foreground">
                   <span>Response{showRaw && " · 原文（SSE）"}</span>
                   <CopyButton text={respText || ""} />
                 </div>
@@ -548,6 +646,7 @@ export default function LLMRecordsPage() {
                 </div>
               </div>
             </div>
+            )}
           </Card>
         )}
       </div>

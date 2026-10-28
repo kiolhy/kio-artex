@@ -12,6 +12,16 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -44,6 +54,7 @@ export function UpdateCard() {
   // 与 progress 分开：暂存完成后进程就没了，SSE 会断，此时要切到轮询 /api/health。
   const [restarting, setRestarting] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  const [confirmAction, setConfirmAction] = React.useState<"update" | "rollback" | null>(null);
 
   // quiet 同时决定要不要绕过后端缓存：进页面时的自动检查用缓存（顶栏刚查过），
   // 用户手动点「检查更新」则强制回源，否则刚发布的版本要等缓存过期才看得到。
@@ -130,18 +141,9 @@ export function UpdateCard() {
     [waitForNewVersion],
   );
 
-  const doUpdate = () => {
+  const startUpdate = () => {
     if (!info) return;
     const from = info.current;
-    const ok = window.confirm(
-      `确定更新到 ${info.latest}？\n\n` +
-        "更新会重启程序，正在运行的任务会被中断。\n" +
-        (info.mode === "docker"
-          ? "\n注意：容器内更新只替换程序本身，不会更新镜像里的 playwright / nmap 等工具链；" +
-            "若新版本依赖新工具，请改用 docker compose pull。"
-          : ""),
-    );
-    if (!ok) return;
 
     setBusy(true);
     setProgress({ phase: "downloading", percent: 0, message: "准备中…" });
@@ -154,14 +156,8 @@ export function UpdateCard() {
     });
   };
 
-  const doRollback = () => {
+  const startRollback = () => {
     if (!info) return;
-    if (
-      !window.confirm(
-        "回滚到上一版本？\n\n程序会重启，正在运行的任务会被中断。\n注意：数据库结构不会回退，旧版本可能无法识别新版写入的数据。",
-      )
-    )
-      return;
     const from = info.current;
     setBusy(true);
     api
@@ -267,7 +263,7 @@ export function UpdateCard() {
 
         {info?.mode === "docker" && info.has_update && (
           <p className="text-xs text-muted-foreground">
-            Docker 下的更新只替换程序本身，不更新镜像里的 playwright / nmap 等工具链，且
+            Docker 下的更新只替换程序本身，不更新镜像内置的浏览器与命令行工具链，且
             <span className="font-mono"> docker compose up -d </span>
             重建容器后会退回镜像自带的版本。需要连镜像一起升级请执行
             <span className="font-mono"> docker compose pull artex &amp;&amp; docker compose up -d artex</span>。
@@ -290,14 +286,14 @@ export function UpdateCard() {
           </Button>
           <Button
             size="sm"
-            onClick={doUpdate}
+            onClick={() => setConfirmAction("update")}
             disabled={busy || restarting || !info?.has_update || info?.asset_available === false}
           >
             <DownloadIcon className="size-4" />
             {info?.has_update ? `更新到 ${info.latest}` : "立即更新"}
           </Button>
           {info?.has_backup && (
-            <Button variant="ghost" size="sm" onClick={doRollback} disabled={busy || restarting}>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmAction("rollback")} disabled={busy || restarting}>
               <RotateCcwIcon className="size-4" />
               回滚到上一版本
             </Button>
@@ -309,6 +305,45 @@ export function UpdateCard() {
           <span className="font-mono"> start.bat</span>）启动 ARTEX；直接运行 artex 本体时，程序退出后不会被自动拉起。
         </p>
       </CardContent>
+
+      <AlertDialog
+        open={confirmAction !== null}
+        onOpenChange={(next) => {
+          if (!next && !busy && !restarting) setConfirmAction(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {confirmAction === "rollback" ? "回滚到上一版本？" : `更新到 ${info?.latest ?? "新版本"}？`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmAction === "rollback"
+                ? "程序会重启，正在运行的任务会被中断。数据库结构不会回退，旧版本可能无法识别新版写入的数据。"
+                : `程序会重启，正在运行的任务会被中断。${
+                    info?.mode === "docker"
+                      ? "容器内更新只替换程序本身，不更新镜像中的运行时工具；若新版本依赖新工具，请改用 docker compose pull。"
+                      : ""
+                  }`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy || restarting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={busy || restarting}
+              onClick={(event) => {
+                event.preventDefault();
+                const action = confirmAction;
+                setConfirmAction(null);
+                if (action === "rollback") startRollback();
+                else if (action === "update") startUpdate();
+              }}
+            >
+              {confirmAction === "rollback" ? "确认回滚" : "确认更新"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }

@@ -7,6 +7,7 @@ import { AppSidebar } from "@/app/(main)/_components/sidebar/app-sidebar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { auth } from "@/lib/auth";
 import { getClientCookie } from "@/lib/cookie.client";
+import { useWorkReminderFeed } from "@/hooks/use-work-reminder-feed";
 import {
   SIDEBAR_COLLAPSIBLE_VALUES,
   SIDEBAR_VARIANT_VALUES,
@@ -33,6 +34,7 @@ export default function Layout({ children }: Readonly<{ children: ReactNode }>) 
   // disables. No token → bounce to /login; render nothing until confirmed so no
   // protected UI (or its API calls) flashes for a logged-out visitor.
   const [authed, setAuthed] = React.useState(false);
+  useWorkReminderFeed(authed);
   React.useEffect(() => {
     if (auth.getToken()) {
       setAuthed(true);

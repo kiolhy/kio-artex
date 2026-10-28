@@ -20,6 +20,15 @@ type Snapshot struct {
 	// 仅 kind=finding_status_changed 时非空。
 	FromStatus string `json:"from_status,omitempty"`
 	ToStatus   string `json:"to_status,omitempty"`
+	// 通用事件目标。漏洞事件 target_type='finding'；个人工作台提醒
+	// target_type='work_task'。Title/Body 用于非漏洞事件的渲染，不再伪造
+	// finding 字段。
+	TargetType string `json:"target_type,omitempty"`
+	TargetID   int64  `json:"target_id,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Body       string `json:"body,omitempty"`
+	Source     string `json:"source,omitempty"`
+	DetailURL  string `json:"detail_url,omitempty"`
 }
 
 // Item 是一条待推送的漏洞，供渠道渲染。
@@ -37,6 +46,9 @@ type Item struct {
 	// 状态变更事件专用；两项均非空时渲染成「待处理 → 已修复」。
 	FromStatus string
 	ToStatus   string
+	// DisplayTitle is the generic event title (e.g. personal task reminder).
+	// Empty means the item is a finding and uses Name/VulnClass.
+	DisplayTitle string
 }
 
 // IsStatusChange 报告该条目是否为状态变更事件。
@@ -45,6 +57,9 @@ func (i Item) IsStatusChange() bool { return i.FromStatus != "" || i.ToStatus !=
 // Title 返回条目的展示标题：优先人工命名的 name，回退漏洞类型 vulnclass，
 // 两者都空时用一个占位符——绝不输出空标题。
 func (i Item) Title() string {
+	if i.DisplayTitle != "" {
+		return i.DisplayTitle
+	}
 	if i.Name != "" {
 		return i.Name
 	}

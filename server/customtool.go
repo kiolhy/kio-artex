@@ -182,10 +182,21 @@ func (s *Server) pgTestCustomTool(w http.ResponseWriter, r *http.Request) {
 
 const settingPythonInterp = "python_interpreter"
 
-// detectPython finds a python interpreter absolute path (python3 preferred).
+// detectPython finds a usable python interpreter absolute path (python3
+// preferred). Windows ships an App Execution Alias named python3.exe even when
+// Python is not installed; LookPath succeeds for it but starting it exits with
+// 9009, so an executable must pass a real version probe before it is stored.
 func detectPython() string {
 	for _, c := range []string{"python3", "python"} {
-		if p, err := exec.LookPath(c); err == nil {
+		p, err := exec.LookPath(c)
+		if err != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		probe := exec.CommandContext(ctx, p, "--version")
+		probeErr := probe.Run()
+		cancel()
+		if probeErr == nil {
 			return p
 		}
 	}

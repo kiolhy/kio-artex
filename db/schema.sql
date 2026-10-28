@@ -505,6 +505,8 @@ CREATE TRIGGER trg_task_categories_upd BEFORE UPDATE ON task_categories
 CREATE TABLE IF NOT EXISTS tasks (
     id             BIGSERIAL PRIMARY KEY,
     name           TEXT NOT NULL DEFAULT '',
+    run_kind       TEXT NOT NULL DEFAULT 'pentest'
+                     CHECK (run_kind IN ('pentest','personal')),
     category_id    BIGINT REFERENCES task_categories(id) ON DELETE SET NULL,
     description    TEXT NOT NULL,
     goal           TEXT NOT NULL,
@@ -546,6 +548,19 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false
 -- 给 agent 开放 add_task_scope/list_untested_assets;false=全部关闭(见 task_scope.go)。
 -- 存量任务默认 true 保持原行为;company 关联(task_scope kind=company)不受此开关影响。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEFAULT true;
+-- 个人工作台自动任务与显式安全任务共享执行引擎，但使用不同提示词和工具面。
+-- 旧任务全部保持 pentest，避免升级后改变既有行为。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS run_kind TEXT NOT NULL DEFAULT 'pentest';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='tasks_run_kind_check' AND conrelid='tasks'::regclass
+    ) THEN
+        ALTER TABLE tasks ADD CONSTRAINT tasks_run_kind_check
+            CHECK (run_kind IN ('pentest','personal'));
+    END IF;
+END $$;
 -- queued_at makes admission FIFO reflect the actual enqueue order rather than the
 -- task creation order. queue_mode distinguishes first bootstrap from resuming an
 -- exploration that already owns goals/history.
@@ -981,8 +996,11 @@ CREATE TABLE IF NOT EXISTS conversation_activities (
     output_tokens      INTEGER,
     cache_read_tokens  INTEGER,
     cache_write_tokens INTEGER,
+    metadata           JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE conversation_activities
+    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_conv_act ON conversation_activities(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_conv_act_tool_call ON conversation_activities(conversation_id, tool_use_id, id)
   WHERE kind IN ('tool_use', 'tool_result');
@@ -1343,14 +1361,25 @@ CREATE TABLE IF NOT EXISTS notification_events (
     -- finding_created | finding_status_changed
     kind       TEXT NOT NULL,
     finding_id BIGINT NOT NULL,
+    target_type TEXT,
+    target_id   BIGINT,
     snapshot   JSONB NOT NULL,
     -- fan-out 幂等标记：dispatcher 按此列取待分派事件，处理完置 true。
     -- 用列而非删行，以便投递历史能回溯到事件。
     fanned_out BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 兼容迁移：存量漏洞事件补齐通用目标字段；finding_id 保留但允许个人提醒为空。
+ALTER TABLE notification_events ADD COLUMN IF NOT EXISTS target_type TEXT;
+ALTER TABLE notification_events ADD COLUMN IF NOT EXISTS target_id BIGINT;
+ALTER TABLE notification_events ALTER COLUMN finding_id DROP NOT NULL;
+UPDATE notification_events
+SET target_type = 'finding', target_id = finding_id
+WHERE target_type IS NULL AND finding_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_events_pending
     ON notification_events(id) WHERE NOT fanned_out;
+CREATE INDEX IF NOT EXISTS idx_notification_events_target
+    ON notification_events(target_type, target_id) WHERE target_type IS NOT NULL;
 
 -- 投递任务：一条事件 × 一个启用渠道 = 一行。fan-out 在事务外做，所以渠道
 -- 后开不会补历史(与 agent_triggers 的「迟开 trigger 不补历史」语义一致，
@@ -1384,3 +1413,391 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+-- =====================================================================
+-- N. 个人工作台
+--
+-- ARTEX 当前是单账号部署，owner_key 固定为 'ARTEX'。这里保留字段是为了
+-- 未来引入真实身份时不必再迁移个人数据；API 层永远强制注入该值。
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS work_projects (
+    id          BIGSERIAL PRIMARY KEY,
+    owner_key   TEXT NOT NULL DEFAULT 'ARTEX',
+    name        TEXT NOT NULL,
+    color       TEXT NOT NULL DEFAULT '#38bdf8',
+    description TEXT NOT NULL DEFAULT '',
+    archived    BOOLEAN NOT NULL DEFAULT false,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_work_projects_owner_name UNIQUE (owner_key, name)
+);
+CREATE INDEX IF NOT EXISTS idx_work_projects_owner ON work_projects(owner_key);
+DROP TRIGGER IF EXISTS trg_work_projects_upd ON work_projects;
+CREATE TRIGGER trg_work_projects_upd BEFORE UPDATE ON work_projects
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS work_tags (
+    id        BIGSERIAL PRIMARY KEY,
+    owner_key TEXT NOT NULL DEFAULT 'ARTEX',
+    name      TEXT NOT NULL,
+    color     TEXT NOT NULL DEFAULT '#94a3b8',
+    CONSTRAINT uq_work_tags_owner_name UNIQUE (owner_key, name)
+);
+CREATE INDEX IF NOT EXISTS idx_work_tags_owner ON work_tags(owner_key);
+
+CREATE TABLE IF NOT EXISTS work_tasks (
+    id             BIGSERIAL PRIMARY KEY,
+    owner_key      TEXT NOT NULL DEFAULT 'ARTEX',
+    title          TEXT NOT NULL,
+    description    TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'todo',
+    priority       TEXT NOT NULL DEFAULT 'medium',
+    project_id     BIGINT REFERENCES work_projects(id) ON DELETE SET NULL,
+    parent_task_id BIGINT REFERENCES work_tasks(id) ON DELETE CASCADE,
+    start_at       TIMESTAMPTZ,
+    due_at         TIMESTAMPTZ,
+    completed_at   TIMESTAMPTZ,
+    repeat_rule    TEXT NOT NULL DEFAULT '',
+    artex_task_id  TEXT,
+    automation_status      TEXT NOT NULL DEFAULT 'pending',
+    automation_error       TEXT NOT NULL DEFAULT '',
+    automation_result      TEXT NOT NULL DEFAULT '',
+    automation_launched_at TIMESTAMPTZ,
+    automation_finished_at TIMESTAMPTZ,
+    origin_conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+    origin_activity_id     BIGINT REFERENCES conversation_activities(id) ON DELETE SET NULL,
+    idempotency_key        TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_work_tasks_status CHECK (status IN ('todo','doing','done','canceled')),
+    CONSTRAINT ck_work_tasks_priority CHECK (priority IN ('low','medium','high','urgent')),
+    CONSTRAINT ck_work_tasks_repeat CHECK (repeat_rule IN ('','daily','weekly','monthly','weekdays')),
+    CONSTRAINT ck_work_tasks_complete CHECK (status <> 'done' OR completed_at IS NOT NULL)
+);
+ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS automation_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS automation_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS automation_result TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS automation_launched_at TIMESTAMPTZ;
+ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS automation_finished_at TIMESTAMPTZ;
+ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS origin_conversation_id BIGINT
+    REFERENCES conversations(id) ON DELETE SET NULL;
+ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS origin_activity_id BIGINT
+    REFERENCES conversation_activities(id) ON DELETE SET NULL;
+ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_work_tasks_automation_status'
+          AND conrelid = 'work_tasks'::regclass
+    ) THEN
+        ALTER TABLE work_tasks ADD CONSTRAINT ck_work_tasks_automation_status
+            CHECK (automation_status IN ('pending','running','done','failed','canceled'));
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_work_tasks_owner_status_due ON work_tasks(owner_key, status, due_at);
+CREATE INDEX IF NOT EXISTS idx_work_tasks_automation_due
+    ON work_tasks(owner_key, automation_status, start_at)
+    WHERE parent_task_id IS NULL AND automation_status = 'pending' AND artex_task_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_work_tasks_project ON work_tasks(project_id) WHERE project_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_work_tasks_parent ON work_tasks(parent_task_id) WHERE parent_task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_work_tasks_artex ON work_tasks(artex_task_id) WHERE artex_task_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_work_tasks_idempotency
+    ON work_tasks(owner_key, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+-- Normalize historical descendants. Only a root task owns the ARTEX automation
+-- lifecycle; child rows are planning context and must not claim that they ran,
+-- failed, or were canceled independently.
+WITH RECURSIVE work_descendants AS (
+    SELECT child.id,
+           root.automation_status AS root_automation_status,
+           root.automation_finished_at AS root_automation_finished_at
+    FROM work_tasks root
+    JOIN work_tasks child ON child.parent_task_id=root.id AND child.owner_key=root.owner_key
+    WHERE root.owner_key='ARTEX'
+      AND root.parent_task_id IS NULL
+      AND root.automation_status IN ('done','failed','canceled')
+    UNION ALL
+    SELECT child.id,
+           parent.root_automation_status,
+           parent.root_automation_finished_at
+    FROM work_tasks child
+    JOIN work_descendants parent ON child.parent_task_id=parent.id
+    WHERE child.owner_key='ARTEX'
+)
+UPDATE work_tasks task
+SET status=CASE
+        WHEN repair.root_automation_status='done' THEN 'done'
+        WHEN repair.root_automation_status='failed' AND task.status<>'done' THEN 'doing'
+        ELSE task.status
+    END,
+    completed_at=CASE
+        WHEN repair.root_automation_status='done'
+            THEN COALESCE(task.completed_at,repair.root_automation_finished_at,now())
+        ELSE task.completed_at
+    END,
+    automation_status='pending',
+    automation_error='',
+    automation_result='',
+    automation_launched_at=NULL,
+    automation_finished_at=NULL,
+    artex_task_id=NULL
+FROM work_descendants repair
+WHERE task.id=repair.id
+  AND task.owner_key='ARTEX'
+  AND (
+      task.automation_status IS DISTINCT FROM 'pending'
+      OR task.automation_error<>''
+      OR task.automation_result<>''
+      OR task.automation_launched_at IS NOT NULL
+      OR task.automation_finished_at IS NOT NULL
+      OR task.artex_task_id IS NOT NULL
+      OR (repair.root_automation_status='done' AND task.status<>'done')
+  );
+-- Older builds could mark a manually completed root task as automation=done
+-- even though no ARTEX task was ever launched and no result was stored. Keep
+-- the human completion history, but make it explicit that automation did not
+-- run. Rows with a real result are intentionally left untouched.
+UPDATE work_tasks
+SET automation_status='canceled',
+    automation_error='',
+    automation_finished_at=COALESCE(automation_finished_at,completed_at,now())
+WHERE owner_key='ARTEX'
+  AND parent_task_id IS NULL
+  AND automation_status='done'
+  AND artex_task_id IS NULL
+  AND BTRIM(COALESCE(automation_result,''))='';
+DROP TRIGGER IF EXISTS trg_work_tasks_upd ON work_tasks;
+CREATE TRIGGER trg_work_tasks_upd BEFORE UPDATE ON work_tasks
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS work_task_tags (
+    task_id BIGINT NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+    tag_id  BIGINT NOT NULL REFERENCES work_tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_work_task_tags_tag ON work_task_tags(tag_id);
+
+CREATE TABLE IF NOT EXISTS work_notes (
+    id         BIGSERIAL PRIMARY KEY,
+    owner_key  TEXT NOT NULL DEFAULT 'ARTEX',
+    title      TEXT NOT NULL DEFAULT '无标题',
+    content    TEXT NOT NULL DEFAULT '',
+    pinned     BOOLEAN NOT NULL DEFAULT false,
+    archived   BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_work_notes_owner_updated ON work_notes(owner_key, updated_at DESC);
+DROP TRIGGER IF EXISTS trg_work_notes_upd ON work_notes;
+CREATE TRIGGER trg_work_notes_upd BEFORE UPDATE ON work_notes
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS work_note_tags (
+    note_id BIGINT NOT NULL REFERENCES work_notes(id) ON DELETE CASCADE,
+    tag_id  BIGINT NOT NULL REFERENCES work_tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (note_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_work_note_tags_tag ON work_note_tags(tag_id);
+
+CREATE TABLE IF NOT EXISTS work_task_reminders (
+    id           BIGSERIAL PRIMARY KEY,
+    task_id      BIGINT NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL DEFAULT 'due',
+    minutes      INTEGER NOT NULL DEFAULT 10,
+    fired        BOOLEAN NOT NULL DEFAULT false,
+    fired_at     TIMESTAMPTZ,
+    CONSTRAINT ck_work_task_reminders_kind CHECK (kind IN ('due','overdue')),
+    CONSTRAINT uq_work_task_reminder_task_kind UNIQUE (task_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_work_task_reminders_due ON work_task_reminders(fired, task_id);
+
+CREATE TABLE IF NOT EXISTS work_task_reminder_channels (
+    reminder_id BIGINT NOT NULL REFERENCES work_task_reminders(id) ON DELETE CASCADE,
+    channel_id  BIGINT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    PRIMARY KEY (reminder_id, channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS push_device_tokens (
+    id          BIGSERIAL PRIMARY KEY,
+    owner_key   TEXT NOT NULL DEFAULT 'ARTEX',
+    token       TEXT NOT NULL,
+    token_hash  TEXT NOT NULL UNIQUE,
+    platform    TEXT NOT NULL DEFAULT 'android',
+    device_name TEXT NOT NULL DEFAULT '',
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_push_device_tokens_owner ON push_device_tokens(owner_key);
+DROP TRIGGER IF EXISTS trg_push_device_tokens_upd ON push_device_tokens;
+CREATE TRIGGER trg_push_device_tokens_upd BEFORE UPDATE ON push_device_tokens
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS push_fires (
+    push_type TEXT NOT NULL,
+    target_id BIGINT NOT NULL,
+    fired_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (push_type, target_id)
+);
+
+CREATE TABLE IF NOT EXISTS work_settings (
+    owner_key                 TEXT PRIMARY KEY,
+    default_reminder_minutes  INTEGER NOT NULL DEFAULT 10,
+    default_channel_id        BIGINT REFERENCES notification_channels(id) ON DELETE SET NULL,
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS trg_work_settings_upd ON work_settings;
+CREATE TRIGGER trg_work_settings_upd BEFORE UPDATE ON work_settings
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS work_dashboard_layouts (
+    owner_key  TEXT PRIMARY KEY,
+    layout     JSONB NOT NULL DEFAULT '[]',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS trg_work_dashboard_layouts_upd ON work_dashboard_layouts;
+CREATE TRIGGER trg_work_dashboard_layouts_upd BEFORE UPDATE ON work_dashboard_layouts
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =====================================================================
+-- O. 个人资料资产
+--
+-- 与旧的安全资产 assets 表完全分离。work_assets 是可跨个人任务复用的
+-- 资料库；每次自动执行会把实际选中的资产和版本冻结到 work_task_asset_runs，
+-- 因而后续更新或删除资产不会改变已经开始的执行。
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS work_assets (
+    id               BIGSERIAL PRIMARY KEY,
+    owner_key        TEXT NOT NULL DEFAULT 'ARTEX',
+    asset_type       TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    description      TEXT NOT NULL DEFAULT '',
+    mime_type        TEXT NOT NULL DEFAULT '',
+    file_name        TEXT NOT NULL DEFAULT '',
+    size_bytes       BIGINT NOT NULL DEFAULT 0,
+    sha256           TEXT NOT NULL DEFAULT '',
+    source_url       TEXT NOT NULL DEFAULT '',
+    parse_status     TEXT NOT NULL DEFAULT 'pending',
+    parse_error      TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    keywords         TEXT NOT NULL DEFAULT '',
+    current_version  INTEGER NOT NULL DEFAULT 0,
+    internal_access  BOOLEAN NOT NULL DEFAULT false,
+    allowed_hosts    JSONB NOT NULL DEFAULT '[]',
+    archived_at      TIMESTAMPTZ,
+    deleted_at       TIMESTAMPTZ,
+    last_used_at     TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_work_assets_type CHECK (asset_type IN ('image','document','table','link','api')),
+    CONSTRAINT ck_work_assets_parse CHECK (parse_status IN ('pending','processing','ready','partial','failed')),
+    CONSTRAINT ck_work_assets_size CHECK (size_bytes >= 0)
+);
+ALTER TABLE work_assets ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_work_assets_owner_updated
+    ON work_assets(owner_key, deleted_at, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_assets_owner_last_used
+    ON work_assets(owner_key, last_used_at DESC NULLS LAST) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_work_assets_owner_type
+    ON work_assets(owner_key, asset_type, parse_status);
+CREATE INDEX IF NOT EXISTS idx_work_assets_sha
+    ON work_assets(owner_key, sha256) WHERE sha256 <> '';
+DROP TRIGGER IF EXISTS trg_work_assets_upd ON work_assets;
+CREATE TRIGGER trg_work_assets_upd BEFORE UPDATE ON work_assets
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS work_asset_versions (
+    id               BIGSERIAL PRIMARY KEY,
+    asset_id         BIGINT NOT NULL REFERENCES work_assets(id) ON DELETE CASCADE,
+    version_number   INTEGER NOT NULL,
+    original_path    TEXT NOT NULL DEFAULT '',
+    source_url       TEXT NOT NULL DEFAULT '',
+    openapi_content  TEXT NOT NULL DEFAULT '',
+    extracted_text   TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    metadata         JSONB NOT NULL DEFAULT '{}',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(asset_id, version_number)
+);
+CREATE INDEX IF NOT EXISTS idx_work_asset_versions_asset
+    ON work_asset_versions(asset_id, version_number DESC);
+
+CREATE TABLE IF NOT EXISTS work_asset_chunks (
+    id               BIGSERIAL PRIMARY KEY,
+    asset_id         BIGINT NOT NULL REFERENCES work_assets(id) ON DELETE CASCADE,
+    asset_version_id BIGINT NOT NULL REFERENCES work_asset_versions(id) ON DELETE CASCADE,
+    ordinal          INTEGER NOT NULL,
+    locator          TEXT NOT NULL DEFAULT '',
+    content          TEXT NOT NULL,
+    keywords         TEXT NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(asset_version_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_work_asset_chunks_version
+    ON work_asset_chunks(asset_version_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_work_asset_chunks_asset
+    ON work_asset_chunks(asset_id);
+
+CREATE TABLE IF NOT EXISTS work_asset_tags (
+    asset_id BIGINT NOT NULL REFERENCES work_assets(id) ON DELETE CASCADE,
+    tag_id   BIGINT NOT NULL REFERENCES work_tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (asset_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_work_asset_tags_tag ON work_asset_tags(tag_id);
+
+CREATE TABLE IF NOT EXISTS work_task_assets (
+    task_id   BIGINT NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+    asset_id  BIGINT NOT NULL REFERENCES work_assets(id) ON DELETE CASCADE,
+    relation  TEXT NOT NULL,
+    reason    TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, asset_id),
+    CONSTRAINT ck_work_task_assets_relation CHECK (relation IN ('pinned','excluded'))
+);
+CREATE INDEX IF NOT EXISTS idx_work_task_assets_asset ON work_task_assets(asset_id);
+
+CREATE TABLE IF NOT EXISTS work_task_asset_runs (
+    id               BIGSERIAL PRIMARY KEY,
+    task_id          BIGINT NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+    artex_task_id    TEXT NOT NULL DEFAULT '',
+    asset_id         BIGINT REFERENCES work_assets(id) ON DELETE SET NULL,
+    asset_version_id BIGINT REFERENCES work_asset_versions(id) ON DELETE SET NULL,
+    chunk_ids        BIGINT[] NOT NULL DEFAULT '{}',
+    selection_reason TEXT NOT NULL DEFAULT '',
+    relevance        DOUBLE PRECISION NOT NULL DEFAULT 0,
+    source           TEXT NOT NULL DEFAULT 'automatic',
+    snapshot         JSONB NOT NULL DEFAULT '{}',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(task_id, artex_task_id, asset_id)
+);
+-- Existing installations were created with cascading asset foreign keys.
+-- Execution snapshots are audit records and must survive a later purge.
+ALTER TABLE work_task_asset_runs ALTER COLUMN asset_id DROP NOT NULL;
+ALTER TABLE work_task_asset_runs ALTER COLUMN asset_version_id DROP NOT NULL;
+ALTER TABLE work_task_asset_runs
+    DROP CONSTRAINT IF EXISTS work_task_asset_runs_asset_id_fkey;
+ALTER TABLE work_task_asset_runs
+    ADD CONSTRAINT work_task_asset_runs_asset_id_fkey
+    FOREIGN KEY (asset_id) REFERENCES work_assets(id) ON DELETE SET NULL;
+ALTER TABLE work_task_asset_runs
+    DROP CONSTRAINT IF EXISTS work_task_asset_runs_asset_version_id_fkey;
+ALTER TABLE work_task_asset_runs
+    ADD CONSTRAINT work_task_asset_runs_asset_version_id_fkey
+    FOREIGN KEY (asset_version_id) REFERENCES work_asset_versions(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_work_task_asset_runs_task
+    ON work_task_asset_runs(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_task_asset_runs_artex
+    ON work_task_asset_runs(artex_task_id) WHERE artex_task_id <> '';
+
+CREATE TABLE IF NOT EXISTS work_asset_secret_refs (
+    id         BIGSERIAL PRIMARY KEY,
+    asset_id   BIGINT NOT NULL REFERENCES work_assets(id) ON DELETE CASCADE,
+    alias      TEXT NOT NULL,
+    env_name   TEXT NOT NULL,
+    location   TEXT NOT NULL DEFAULT 'header',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(asset_id, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_work_asset_secret_refs_asset ON work_asset_secret_refs(asset_id);

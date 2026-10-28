@@ -90,15 +90,26 @@ function TaskTemplateManager({
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [categories, setCategories] = React.useState<TaskCategory[]>([]);
+  const [categoriesLoading, setCategoriesLoading] = React.useState(false);
+  const [categoriesError, setCategoriesError] = React.useState("");
   const wasOpen = React.useRef(false);
+
+  const loadCategories = React.useCallback(async () => {
+    setCategoriesLoading(true);
+    setCategoriesError("");
+    try {
+      setCategories(await api.taskCategories());
+    } catch (error) {
+      setCategoriesError((error as Error).message || "任务分类读取失败");
+    } finally {
+      setCategoriesLoading(false);
+    }
+  }, []);
 
   React.useEffect(() => {
     if (!open) return;
-    api
-      .taskCategories()
-      .then(setCategories)
-      .catch(() => setCategories([]));
-  }, [open]);
+    void loadCategories();
+  }, [open, loadCategories]);
 
   React.useEffect(() => {
     if (open && !wasOpen.current) {
@@ -245,7 +256,7 @@ function TaskTemplateManager({
                     id="task-template-name"
                     value={draft.name}
                     maxLength={120}
-                    placeholder="例如：外部 Web 渗透"
+                    placeholder="例如：每周个人复盘"
                     onChange={(event) => updateDraft("name", event.target.value)}
                   />
                 </Field>
@@ -275,6 +286,7 @@ function TaskTemplateManager({
                     id="task-template-category"
                     className="w-full"
                     value={draft.categoryID == null ? "" : String(draft.categoryID)}
+                    disabled={categoriesLoading || !!categoriesError}
                     onChange={(event) =>
                       patchDraft({ categoryID: event.target.value === "" ? null : Number(event.target.value) })
                     }
@@ -286,7 +298,18 @@ function TaskTemplateManager({
                       </NativeSelectOption>
                     ))}
                   </NativeSelect>
-                  <FieldDescription>应用模板时预填此分类（可再改）。</FieldDescription>
+                  {categoriesError ? (
+                    <div className="flex items-start justify-between gap-2 text-xs text-destructive">
+                      <span>分类读取失败，已保留模板原分类：{categoriesError}</span>
+                      <Button type="button" size="sm" variant="ghost" onClick={() => void loadCategories()}>
+                        重试
+                      </Button>
+                    </div>
+                  ) : (
+                    <FieldDescription>
+                      {categoriesLoading ? "正在读取任务分类…" : "应用模板时预填此分类（可再改）。"}
+                    </FieldDescription>
+                  )}
                 </Field>
                 <Field>
                   <FieldLabel>任务级拦截 / 允许规则</FieldLabel>

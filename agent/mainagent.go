@@ -100,8 +100,15 @@ const mainAgentDefaultTmpl = `你是一个授权渗透测试系统的"主 agent"
 
 不要编造发现；只根据工具返回的真实数据回答。`
 
-func mainAgentSystem(goal, dataDir, workDir string) string {
-	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+func mainAgentSystem(ctx context.Context, goal, dataDir, workDir string) string {
+	def := mainAgentDefaultTmpl
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		def = personalMainAgentDefaultTmpl
+	}
+	body := renderSystemForRun(ctx, "mainagent", def, MainVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+	if RunInfoFrom(ctx).RunKind == "personal" {
+		return body + personalArtifactSpec(workDir)
+	}
 	return body + artifactSpec(workDir)
 }
 
@@ -125,13 +132,16 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultTools()...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	ri := RunInfoFrom(ctx)
+	ri.TaskID = taskID
+	ri.ExplorationID = explorationID(ts)
+	ctx = WithRunInfo(ctx, ri)
 	tools, def, cleanup := AugmentTools(ctx, "mainagent", base)
 	defer cleanup()
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	mainDir := ensureRunDir(m.workDir, taskID, 0)
 	ctx = intercept.WithReviewWorkingDirectory(ctx, mainDir)
-	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
+	system, boundary := deferredSystem(mainAgentSystem(ctx, goal, m.workDir, mainDir), def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
 		SystemPrompt:    system,

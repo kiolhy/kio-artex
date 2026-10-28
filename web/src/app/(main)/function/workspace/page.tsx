@@ -14,6 +14,16 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -71,6 +81,9 @@ export default function WorkspacePage() {
   const [path, setPath] = React.useState("");
   const [entries, setEntries] = React.useState<WorkspaceEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
+  const [pendingDelete, setPendingDelete] = React.useState<WorkspaceEntry | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
   const [edit, setEdit] = React.useState<EditState | null>(null);
   const [mkdirOpen, setMkdirOpen] = React.useState(false);
   const [mkdirName, setMkdirName] = React.useState("");
@@ -79,13 +92,18 @@ export default function WorkspacePage() {
   const load = React.useCallback(
     (p: string) => {
       setLoading(true);
+      setLoadError("");
       api
         .workspaceList(p)
         .then((r) => {
           setEntries(r.entries);
           setPath(r.path);
         })
-        .catch((e) => toast.error(`读取目录失败：${(e as Error).message}`))
+        .catch((e) => {
+          const message = (e as Error).message;
+          setLoadError(message);
+          toast.error(`读取目录失败：${message}`);
+        })
         .finally(() => setLoading(false));
     },
     [],
@@ -129,15 +147,19 @@ export default function WorkspacePage() {
       });
   };
 
-  const del = (e: WorkspaceEntry) => {
-    if (!window.confirm(`确认删除 ${e.dir ? "目录" : "文件"} “${e.name}”？${e.dir ? "（含其下所有内容）" : ""}`)) return;
-    api
-      .workspaceDelete(e.path)
-      .then(() => {
-        toast.success("已删除");
-        load(path);
-      })
-      .catch((err) => toast.error(`删除失败：${(err as Error).message}`));
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await api.workspaceDelete(pendingDelete.path);
+      toast.success("已删除");
+      setPendingDelete(null);
+      load(path);
+    } catch (err) {
+      toast.error(`删除失败：${(err as Error).message}`);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const doUpload = (files: FileList | null) => {
@@ -226,7 +248,20 @@ export default function WorkspacePage() {
               {entries.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={4} className="text-muted-foreground py-10 text-center text-sm">
-                    {loading ? "加载中…" : "空目录"}
+                    {loading ? (
+                      "加载中…"
+                    ) : loadError ? (
+                      <div className="flex flex-col items-center gap-3">
+                        <span className="text-destructive">读取失败：{loadError}</span>
+                        <Button size="sm" variant="outline" onClick={() => load(path)}>
+                          <RefreshCwIcon /> 重试
+                        </Button>
+                      </div>
+                    ) : path ? (
+                      "当前文件夹为空"
+                    ) : (
+                      "工作空间还没有文件，可以上传文件或新建文件夹"
+                    )}
                   </TableCell>
                 </TableRow>
               )}
@@ -268,7 +303,8 @@ export default function WorkspacePage() {
                         size="icon"
                         className="text-destructive size-7"
                         title="删除"
-                        onClick={() => del(e)}
+                        aria-label={`删除${e.dir ? "文件夹" : "文件"} ${e.name}`}
+                        onClick={() => setPendingDelete(e)}
                       >
                         <Trash2Icon className="size-3.5" />
                       </Button>
@@ -280,6 +316,37 @@ export default function WorkspacePage() {
           </Table>
         </CardContent>
       </Card>
+
+      <AlertDialog
+        open={!!pendingDelete}
+        onOpenChange={(next) => !next && !deleting && setPendingDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              删除{pendingDelete?.dir ? "文件夹" : "文件"}「{pendingDelete?.name}」？
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete?.dir
+                ? "该文件夹及其中的全部文件都会被删除。此操作不可撤销。"
+                : "该文件会从工作空间中永久删除。此操作不可撤销。"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmDelete();
+              }}
+            >
+              {deleting ? "删除中…" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* 文件查看 / 编辑 */}
       <Sheet open={edit !== null} onOpenChange={(o) => !o && setEdit(null)}>

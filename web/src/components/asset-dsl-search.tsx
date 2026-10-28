@@ -374,7 +374,7 @@ export function AssetDslSearch({
         )}
       </div>
       {query.trim() && !open && (
-        <p className="pl-1 text-[11px] text-muted-foreground">
+        <p className="pl-1 text-xs text-muted-foreground">
           {loading ? "搜索中…" : error ? <span className="text-destructive">{error}</span> : `找到 ${count ?? 0} 条`}
         </p>
       )}
