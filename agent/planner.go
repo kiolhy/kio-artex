@@ -433,7 +433,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		DeepSeekSearchAPIKey:  p.webSearch.DeepSeekAPIKey,
 		DeepSeekSearchModel:   p.webSearch.DeepSeekModel,
 		WebSearchProxy:        p.webSearch.Proxy,
-		BashEnv:               proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		BashEnv:               bashEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
 		WorkingDir:            taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:         cmdOutDir(taskDir),
 		MaxTurns:              p.maxTurns, // 0 = unlimited (configurable in agent management)

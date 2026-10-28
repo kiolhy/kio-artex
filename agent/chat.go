@@ -198,7 +198,7 @@ func (c *ChatAgent) ChatWithOptions(ctx context.Context, agentKey, sessionID, me
 		DeepSeekSearchAPIKey:  ws.DeepSeekAPIKey,
 		DeepSeekSearchModel:   ws.DeepSeekModel,
 		WebSearchProxy:        ws.Proxy,
-		BashEnv:               proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		BashEnv:               bashEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
 		WorkingDir:            sessionWorkDir,
 		MaxTurns:              maxTurns,
 		MaxDuration:           maxDuration,

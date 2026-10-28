@@ -12,6 +12,7 @@ import (
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/envfilter"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
@@ -190,6 +191,19 @@ func (w *Worker) SetProxy(addr, caCert string) { w.proxyAddr, w.proxyCACert = ad
 
 // SetWebSearch selects the web_search backend for this worker (off by default).
 func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
+
+// bashEnv 是给 Bash / PTY shell / 后台任务用的最终环境增量：
+// 代理与 CA 信任（proxyEnv）+ 平台凭据摘除（envfilter）。
+//
+// 为什么必须走这个函数而不是直接用 proxyEnv：norma 起子进程时是
+// `append(os.Environ(), extra...)`，会完整继承 ARTEX 自己的环境，包括数据库口令
+// （ARTEX_PG_DSN）和模型密钥（ANTHROPIC_API_KEY / OPENAI_API_KEY）。agent 跑一句
+// `env` 就能读到，而工具输出会进 transcript。envfilter 通过追加 "NAME=" 覆盖项把
+// 这些值清空（os/exec 自 1.19 起对 Env 去重，同名保留最后一个）。
+func bashEnv(proxyAddr, caCert string) []string {
+	env := proxyEnv(proxyAddr, caCert)
+	return append(env, envfilter.Overrides()...)
+}
 
 // proxyEnv builds the Bash-subprocess env that routes child-command HTTP through
 // the egress proxy (the recording MITM when capture is on, or the global proxy
@@ -469,7 +483,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		DeepSeekSearchModel:   w.webSearch.DeepSeekModel,
 		WebSearchProxy:        w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
-		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert),
+		BashEnv:    bashEnv(w.proxyAddr, w.proxyCACert),
 		WorkingDir: runDir,
 		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
