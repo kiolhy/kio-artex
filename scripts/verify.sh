@@ -65,13 +65,30 @@ else
   rm -f "$TEST_LOG"
 fi
 
-# 3. 可选竞态检测
+# 3. settings 键读写一致性（拼错的键会让功能静默失效，见 scripts/settings_contract.py）
+step "settings 键一致性"
+if command -v python3 >/dev/null 2>&1; then
+  PY=python3
+elif command -v python >/dev/null 2>&1; then
+  PY=python
+else
+  PY=""
+fi
+if [ -z "$PY" ]; then
+  warn "没有 python，跳过 settings 键检查"
+elif "$PY" scripts/settings_contract.py; then
+  ok "settings 键读写一致"
+else
+  bad "存在只读不写的 settings 键"
+fi
+
+# 4. 可选竞态检测
 if [ "$WITH_RACE" = "1" ]; then
   step "go test -race ./agent/... ./db/... ./server/..."
   if go test -race ./agent/... ./db/... ./server/... ; then ok "race 检测通过"; else bad "race 检测失败"; fi
 fi
 
-# 4. 可选前端构建（Next 静态导出 → server/webui，最终由 go:embed 打包）
+# 5. 可选前端构建（Next 静态导出 → server/webui，最终由 go:embed 打包）
 if [ "$WITH_WEB" = "1" ]; then
   step "web 构建"
   if [ ! -d web/node_modules ]; then
