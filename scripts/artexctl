@@ -91,7 +91,8 @@ cmd_start() {
     say "启动后 30 秒内健康检查未通过，最近日志："
     tail -n 40 "$LOG_FILE" 2>/dev/null || true
     cmd_stop >/dev/null 2>&1 || true
-    exit 1
+    # 用 return 而不是 exit：cmd_upgrade 要在失败后接着做回滚。
+    return 1
   fi
 }
 
@@ -115,6 +116,7 @@ cmd_stop() {
 }
 
 cmd_status() {
+  load_env
   if pid="$(pid_of)"; then
     say "运行中（pid ${pid}）"
     if command -v curl >/dev/null 2>&1; then

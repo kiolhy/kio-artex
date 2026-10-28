@@ -8,6 +8,7 @@ import type { DateRange } from "react-day-picker";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { UI_DATE_LOCALE, UI_TEXT } from "@/lib/i18n/locale";
 
 interface DateRangePickerProps {
   value?: DateRange;
@@ -22,14 +23,16 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
     return { from, to };
   });
   const dateRange = value ?? internalDateRange;
-  let dateRangeLabel = "Select date";
+  let dateRangeLabel: string = UI_TEXT.selectDate;
 
   if (dateRange?.from) {
-    dateRangeLabel = format(dateRange.from, "d MMM yyyy");
+    dateRangeLabel = format(dateRange.from, "yyyy年M月d日", { locale: UI_DATE_LOCALE });
   }
 
   if (dateRange?.from && dateRange.to) {
-    dateRangeLabel = `${format(dateRange.from, "d MMM yyyy")} - ${format(dateRange.to, "d MMM yyyy")}`;
+    const from = format(dateRange.from, "yyyy年M月d日", { locale: UI_DATE_LOCALE });
+    const to = format(dateRange.to, "yyyy年M月d日", { locale: UI_DATE_LOCALE });
+    dateRangeLabel = `${from} — ${to}`;
   }
 
   const handleDateChange = (nextValue: DateRange | undefined) => {
