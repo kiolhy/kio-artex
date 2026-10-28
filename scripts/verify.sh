@@ -19,10 +19,12 @@ cd "$ROOT" || exit 1
 
 WITH_WEB=0
 WITH_RACE=0
+NO_DB=0
 for arg in "$@"; do
   case "$arg" in
     --web) WITH_WEB=1 ;;
     --race) WITH_RACE=1 ;;
+    --no-db) NO_DB=1 ;;
     *) echo "未知参数: $arg" >&2; exit 1 ;;
   esac
 done
@@ -31,15 +33,23 @@ fail=0
 step() { printf '\n=== %s ===\n' "$1"; }
 ok()   { printf '  [OK] %s\n' "$1"; }
 bad()  { printf '  [FAIL] %s\n' "$1"; fail=1; }
+warn() { printf '  [WARN] %s\n' "$1"; }
 
 # 1. 编译
 step "go build ./..."
 if go build ./... ; then ok "编译通过"; else bad "编译失败"; fi
 
-# 2. 单元测试（必须带 DSN，且不允许静默 SKIP）
+# 2. 单元测试（默认必须带 DSN，且不允许静默 SKIP）
 step "go test ./..."
 if [ -z "${ARTEX_PG_DSN:-}" ]; then
-  bad "未设置 ARTEX_PG_DSN：db/ 与 server/ 的用例会被静默跳过，这种绿没有意义"
+  if [ "$NO_DB" = "1" ]; then
+    # 本机没有 PostgreSQL 时的退路：只跑不依赖数据库的包，并明确标注 db/server 未验证。
+    warn "未设置 ARTEX_PG_DSN，按 --no-db 只跑非数据库包；db/ 与 server/ 本次未验证"
+    PKGS="$(go list ./... | grep -v -E '/(db|server)$')"
+    if go test $PKGS ; then ok "非数据库包测试通过"; else bad "非数据库包测试失败"; fi
+  else
+    bad "未设置 ARTEX_PG_DSN：db/ 与 server/ 的用例会被静默跳过，这种绿没有意义（本机无 PG 时可加 --no-db 明确降级）"
+  fi
 else
   TEST_LOG="$(mktemp)"
   if go test ./... 2>&1 | tee "$TEST_LOG"; then
