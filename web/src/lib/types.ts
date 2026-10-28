@@ -131,6 +131,56 @@ export interface WorkTaskInput {
 
 export type WorkAssetType = "image" | "document" | "table" | "link" | "api";
 export type WorkAssetParseStatus = "pending" | "processing" | "ready" | "partial" | "failed";
+export type WorkAssetOrganizationStatus =
+  | "none"
+  | "queued"
+  | "processing"
+  | "draft"
+  | "failed"
+  | "confirmed"
+  | "discarded";
+
+export interface WorkAssetOrganizationRef {
+  id: number;
+  asset_id: number;
+  source_version_id: number;
+  source_version_number: number;
+  trigger: "automatic" | "manual";
+  status: Exclude<WorkAssetOrganizationStatus, "none">;
+  error?: string;
+  confirmed_version_id?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkAssetOrganizationEvidence {
+  quote: string;
+  locator: string;
+}
+
+export interface WorkAssetOrganizationCard {
+  summary: string;
+  use_cases: string[];
+  key_facts: string[];
+  constraints: string[];
+  tags: string[];
+  keywords: string[];
+  agent_guidance: string[];
+  evidence: WorkAssetOrganizationEvidence[];
+  uncertainties: string[];
+  warnings: string[];
+}
+
+export interface WorkAssetOrganization extends WorkAssetOrganizationRef {
+  draft_card: Partial<WorkAssetOrganizationCard>;
+  draft_openapi: Record<string, unknown>;
+}
+
+export interface WorkAssetOrganizationConfirmResult {
+  organization: WorkAssetOrganizationRef;
+  version: WorkAssetVersion;
+  asset: WorkAsset;
+}
 
 export interface WorkAsset {
   id: number;
@@ -159,6 +209,10 @@ export interface WorkAsset {
   last_used_at?: string | null;
   recommend_reason?: string;
   relevance?: number;
+  organization_status: WorkAssetOrganizationStatus;
+  latest_organization?: WorkAssetOrganizationRef | null;
+  can_organize: boolean;
+  organization_error?: string;
 }
 
 export interface WorkAssetVersion {
@@ -170,6 +224,9 @@ export interface WorkAssetVersion {
   extracted_text?: string;
   summary: string;
   metadata: Record<string, unknown> | null;
+  content_origin: "source" | "ai_organized";
+  organization_id?: number;
+  confirmed_at?: string | null;
   created_at: string;
 }
 

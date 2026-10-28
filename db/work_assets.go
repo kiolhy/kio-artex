@@ -15,32 +15,36 @@ import (
 // WorkAsset is a reusable personal knowledge source. It is deliberately
 // separate from the legacy security-asset model.
 type WorkAsset struct {
-	ID              int64      `json:"id"`
-	Type            string     `json:"asset_type"`
-	Title           string     `json:"title"`
-	Description     string     `json:"description"`
-	MimeType        string     `json:"mime_type"`
-	FileName        string     `json:"file_name"`
-	SizeBytes       int64      `json:"size_bytes"`
-	SHA256          string     `json:"sha256"`
-	SourceURL       string     `json:"source_url"`
-	ParseStatus     string     `json:"parse_status"`
-	ParseError      string     `json:"parse_error"`
-	Summary         string     `json:"summary"`
-	Keywords        []string   `json:"keywords"`
-	CurrentVersion  int        `json:"current_version"`
-	InternalAccess  bool       `json:"internal_access"`
-	AllowedHosts    []string   `json:"allowed_hosts"`
-	ArchivedAt      *time.Time `json:"archived_at"`
-	DeletedAt       *time.Time `json:"deleted_at"`
-	Tags            []WorkTag  `json:"tags"`
-	ContentURL      string     `json:"content_url"`
-	DownloadURL     string     `json:"download_url"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
-	RecommendReason string     `json:"recommend_reason,omitempty"`
-	Relevance       float64    `json:"relevance,omitempty"`
+	ID                 int64                     `json:"id"`
+	Type               string                    `json:"asset_type"`
+	Title              string                    `json:"title"`
+	Description        string                    `json:"description"`
+	MimeType           string                    `json:"mime_type"`
+	FileName           string                    `json:"file_name"`
+	SizeBytes          int64                     `json:"size_bytes"`
+	SHA256             string                    `json:"sha256"`
+	SourceURL          string                    `json:"source_url"`
+	ParseStatus        string                    `json:"parse_status"`
+	ParseError         string                    `json:"parse_error"`
+	Summary            string                    `json:"summary"`
+	Keywords           []string                  `json:"keywords"`
+	CurrentVersion     int                       `json:"current_version"`
+	InternalAccess     bool                      `json:"internal_access"`
+	AllowedHosts       []string                  `json:"allowed_hosts"`
+	ArchivedAt         *time.Time                `json:"archived_at"`
+	DeletedAt          *time.Time                `json:"deleted_at"`
+	Tags               []WorkTag                 `json:"tags"`
+	ContentURL         string                    `json:"content_url"`
+	DownloadURL        string                    `json:"download_url"`
+	CreatedAt          time.Time                 `json:"created_at"`
+	UpdatedAt          time.Time                 `json:"updated_at"`
+	LastUsedAt         *time.Time                `json:"last_used_at,omitempty"`
+	RecommendReason    string                    `json:"recommend_reason,omitempty"`
+	Relevance          float64                   `json:"relevance,omitempty"`
+	OrganizationStatus string                    `json:"organization_status"`
+	LatestOrganization *WorkAssetOrganizationRef `json:"latest_organization,omitempty"`
+	CanOrganize        bool                      `json:"can_organize"`
+	OrganizationError  string                    `json:"organization_error,omitempty"`
 }
 
 type WorkAssetVersion struct {
@@ -53,6 +57,9 @@ type WorkAssetVersion struct {
 	ExtractedText  string          `json:"extracted_text,omitempty"`
 	Summary        string          `json:"summary"`
 	Metadata       json.RawMessage `json:"metadata"`
+	ContentOrigin  string          `json:"content_origin"`
+	OrganizationID *int64          `json:"organization_id,omitempty"`
+	ConfirmedAt    *time.Time      `json:"confirmed_at,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 }
 
@@ -192,6 +199,8 @@ func scanWorkAsset(sc interface{ Scan(...any) error }) (*WorkAsset, error) {
 		a.AllowedHosts = []string{}
 	}
 	a.Tags = []WorkTag{}
+	a.OrganizationStatus = "none"
+	a.CanOrganize = a.CurrentVersion > 0
 	a.ContentURL = fmt.Sprintf("/api/work/assets/%d/content", a.ID)
 	a.DownloadURL = fmt.Sprintf("/api/work/assets/%d/content?download=1", a.ID)
 	return &a, nil
@@ -287,6 +296,9 @@ ORDER BY a.updated_at DESC`, args...)
 	if err := d.attachWorkAssetTags(ctx, out); err != nil {
 		return nil, err
 	}
+	if err := d.attachWorkAssetOrganizations(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -301,6 +313,9 @@ WHERE a.id=$1 AND a.owner_key=$2`, id, WorkOwner)
 		return nil, err
 	}
 	if err := d.attachWorkAssetTags(ctx, []*WorkAsset{a}); err != nil {
+		return nil, err
+	}
+	if err := d.attachWorkAssetOrganizations(ctx, []*WorkAsset{a}); err != nil {
 		return nil, err
 	}
 	return a, nil
@@ -445,10 +460,12 @@ WHERE id=$1 AND owner_key=$2 AND deleted_at IS NULL FOR UPDATE`, assetID, WorkOw
 		v.Metadata = json.RawMessage(`{}`)
 	}
 	if err := tx.QueryRowContext(ctx, `INSERT INTO work_asset_versions
-(asset_id,version_number,original_path,source_url,openapi_content,extracted_text,summary,metadata)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,created_at`,
+(asset_id,version_number,original_path,source_url,openapi_content,extracted_text,summary,metadata,
+ content_origin,organization_id,confirmed_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id,created_at`,
 		assetID, v.Version, v.OriginalPath, v.SourceURL, v.OpenAPIContent, v.ExtractedText,
-		v.Summary, v.Metadata).Scan(&v.ID, &v.CreatedAt); err != nil {
+		v.Summary, v.Metadata, normalizeAssetContentOrigin(v.ContentOrigin), v.OrganizationID,
+		v.ConfirmedAt).Scan(&v.ID, &v.CreatedAt); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE work_assets SET current_version=$2
@@ -503,7 +520,7 @@ func (d *DB) ListWorkAssetVersions(ctx context.Context, assetID int64) ([]*WorkA
 		return nil, err
 	}
 	rows, err := d.QueryContext(ctx, `SELECT id,asset_id,version_number,original_path,source_url,
-openapi_content,extracted_text,summary,metadata,created_at
+openapi_content,extracted_text,summary,metadata,content_origin,organization_id,confirmed_at,created_at
 FROM work_asset_versions WHERE asset_id=$1 ORDER BY version_number DESC`, assetID)
 	if err != nil {
 		return nil, err
@@ -513,7 +530,8 @@ FROM work_asset_versions WHERE asset_id=$1 ORDER BY version_number DESC`, assetI
 	for rows.Next() {
 		var v WorkAssetVersion
 		if err := rows.Scan(&v.ID, &v.AssetID, &v.Version, &v.OriginalPath, &v.SourceURL,
-			&v.OpenAPIContent, &v.ExtractedText, &v.Summary, &v.Metadata, &v.CreatedAt); err != nil {
+			&v.OpenAPIContent, &v.ExtractedText, &v.Summary, &v.Metadata, &v.ContentOrigin,
+			&v.OrganizationID, &v.ConfirmedAt, &v.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &v)
@@ -524,11 +542,13 @@ FROM work_asset_versions WHERE asset_id=$1 ORDER BY version_number DESC`, assetI
 func (d *DB) CurrentWorkAssetVersion(ctx context.Context, assetID int64) (*WorkAssetVersion, error) {
 	var v WorkAssetVersion
 	err := d.QueryRowContext(ctx, `SELECT v.id,v.asset_id,v.version_number,v.original_path,
-v.source_url,v.openapi_content,v.extracted_text,v.summary,v.metadata,v.created_at
+v.source_url,v.openapi_content,v.extracted_text,v.summary,v.metadata,v.content_origin,
+v.organization_id,v.confirmed_at,v.created_at
 FROM work_asset_versions v JOIN work_assets a ON a.id=v.asset_id
 WHERE v.asset_id=$1 AND v.version_number=a.current_version AND a.owner_key=$2`,
 		assetID, WorkOwner).Scan(&v.ID, &v.AssetID, &v.Version, &v.OriginalPath, &v.SourceURL,
-		&v.OpenAPIContent, &v.ExtractedText, &v.Summary, &v.Metadata, &v.CreatedAt)
+		&v.OpenAPIContent, &v.ExtractedText, &v.Summary, &v.Metadata, &v.ContentOrigin,
+		&v.OrganizationID, &v.ConfirmedAt, &v.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrWorkNotFound
 	}
@@ -538,11 +558,13 @@ WHERE v.asset_id=$1 AND v.version_number=a.current_version AND a.owner_key=$2`,
 func (d *DB) GetWorkAssetVersion(ctx context.Context, assetID, versionID int64) (*WorkAssetVersion, error) {
 	var v WorkAssetVersion
 	err := d.QueryRowContext(ctx, `SELECT v.id,v.asset_id,v.version_number,v.original_path,
-v.source_url,v.openapi_content,v.extracted_text,v.summary,v.metadata,v.created_at
+v.source_url,v.openapi_content,v.extracted_text,v.summary,v.metadata,v.content_origin,
+v.organization_id,v.confirmed_at,v.created_at
 FROM work_asset_versions v JOIN work_assets a ON a.id=v.asset_id
 WHERE v.asset_id=$1 AND v.id=$2 AND a.owner_key=$3`,
 		assetID, versionID, WorkOwner).Scan(&v.ID, &v.AssetID, &v.Version, &v.OriginalPath,
-		&v.SourceURL, &v.OpenAPIContent, &v.ExtractedText, &v.Summary, &v.Metadata, &v.CreatedAt)
+		&v.SourceURL, &v.OpenAPIContent, &v.ExtractedText, &v.Summary, &v.Metadata,
+		&v.ContentOrigin, &v.OrganizationID, &v.ConfirmedAt, &v.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrWorkNotFound
 	}

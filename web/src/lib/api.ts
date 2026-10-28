@@ -109,6 +109,9 @@ import type {
   WorkAssetChunk,
   WorkAssetDetail,
   WorkAssetInput,
+  WorkAssetOrganization,
+  WorkAssetOrganizationConfirmResult,
+  WorkAssetOrganizationRef,
   WorkAssetStats,
   WorkAssetType,
   WorkAssetVersion,
@@ -1503,6 +1506,36 @@ export const api = {
     return http<WorkAsset>(`/work/assets/${id}/versions`, { method: "POST", body });
   },
   reparseWorkAsset: (id: number) => post<WorkAsset>(`/work/assets/${id}/reparse`),
+  workAssetOrganizations: (id: number) =>
+    get<WorkAssetOrganizationRef[]>(`/work/assets/${id}/ai-organizations`).then(arr),
+  workAssetOrganization: (id: number, organizationID: number) =>
+    get<WorkAssetOrganization>(`/work/assets/${id}/ai-organizations/${organizationID}`),
+  organizeWorkAsset: (id: number, source_version_id?: number) =>
+    post<WorkAssetOrganizationRef>(`/work/assets/${id}/ai-organize`, {
+      source_version_id: source_version_id ?? 0,
+    }),
+  updateWorkAssetOrganization: (
+    id: number,
+    organizationID: number,
+    input: { draft_card: unknown; draft_openapi: unknown },
+  ) =>
+    patch<WorkAssetOrganization>(
+      `/work/assets/${id}/ai-organizations/${organizationID}`,
+      input,
+    ),
+  confirmWorkAssetOrganization: (
+    id: number,
+    organizationID: number,
+    input?: { draft_card?: unknown; draft_openapi?: unknown },
+  ) =>
+    post<WorkAssetOrganizationConfirmResult>(
+      `/work/assets/${id}/ai-organizations/${organizationID}/confirm`,
+      input ?? {},
+    ),
+  discardWorkAssetOrganization: (id: number, organizationID: number) =>
+    post<WorkAssetOrganization>(
+      `/work/assets/${id}/ai-organizations/${organizationID}/discard`,
+    ),
   workAssetChunks: (id: number, versionId?: number) => {
     const suffix = versionId ? `?version_id=${versionId}` : "";
     return get<WorkAssetChunk[]>(`/work/assets/${id}/chunks${suffix}`).then(arr);

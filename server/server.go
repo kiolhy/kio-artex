@@ -255,6 +255,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		s.goBackground(func() { newNotifier(s).Run(s.ctx) })
 		s.goBackground(func() { (&workReminderWorker{pg: m.pg}).Run(s.ctx) })
 		s.goBackground(func() { (&workAutomationWorker{server: s}).Run(s.ctx) })
+		s.goBackground(func() { (&workAssetOrganizationWorker{server: s}).Run(s.ctx) })
 		fcmClient, fcmErr := loadFCMClient()
 		if fcmErr != nil {
 			log.Printf("[push] FCM 配置无效: %v", fcmErr)
@@ -977,6 +978,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/work/assets/{id}/secret-refs", s.workListAssetSecretRefs)
 	mux.HandleFunc("PUT /api/work/assets/{id}/secret-refs", s.workReplaceAssetSecretRefs)
 	mux.HandleFunc("POST /api/work/assets/{id}/test-api", s.workAssetTestAPI)
+	mux.HandleFunc("POST /api/work/assets/{id}/ai-organize", s.workAssetAIOrganize)
+	mux.HandleFunc("GET /api/work/assets/{id}/ai-organizations", s.workAssetOrganizations)
+	mux.HandleFunc("GET /api/work/assets/{id}/ai-organizations/{organizationId}", s.workAssetOrganization)
+	mux.HandleFunc("PATCH /api/work/assets/{id}/ai-organizations/{organizationId}", s.workAssetUpdateOrganization)
+	mux.HandleFunc("POST /api/work/assets/{id}/ai-organizations/{organizationId}/confirm", s.workAssetConfirmOrganization)
+	mux.HandleFunc("POST /api/work/assets/{id}/ai-organizations/{organizationId}/discard", s.workAssetDiscardOrganization)
 	// Register each view explicitly. A catch-all "{view}" pattern conflicts with
 	// "/tasks/{id}/reminders" in Go's ServeMux pattern precedence.
 	mux.HandleFunc("GET /api/work/tasks/views/inbox", s.workListTasks)

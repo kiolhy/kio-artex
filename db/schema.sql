@@ -1718,11 +1718,60 @@ CREATE TABLE IF NOT EXISTS work_asset_versions (
     extracted_text   TEXT NOT NULL DEFAULT '',
     summary          TEXT NOT NULL DEFAULT '',
     metadata         JSONB NOT NULL DEFAULT '{}',
+    content_origin   TEXT NOT NULL DEFAULT 'source',
+    organization_id  BIGINT,
+    confirmed_at     TIMESTAMPTZ,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(asset_id, version_number)
 );
+ALTER TABLE work_asset_versions ADD COLUMN IF NOT EXISTS content_origin TEXT NOT NULL DEFAULT 'source';
+ALTER TABLE work_asset_versions ADD COLUMN IF NOT EXISTS organization_id BIGINT;
+ALTER TABLE work_asset_versions ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
+ALTER TABLE work_asset_versions DROP CONSTRAINT IF EXISTS ck_work_asset_versions_origin;
+ALTER TABLE work_asset_versions
+    ADD CONSTRAINT ck_work_asset_versions_origin
+    CHECK (content_origin IN ('source','ai_organized'));
 CREATE INDEX IF NOT EXISTS idx_work_asset_versions_asset
     ON work_asset_versions(asset_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_work_asset_versions_organization
+    ON work_asset_versions(organization_id) WHERE organization_id IS NOT NULL;
+
+-- AI organization drafts are separate from immutable asset versions. A draft
+-- never changes the active version until the user explicitly confirms it.
+CREATE TABLE IF NOT EXISTS work_asset_organizations (
+    id                   BIGSERIAL PRIMARY KEY,
+    owner_key            TEXT NOT NULL DEFAULT 'ARTEX',
+    asset_id             BIGINT NOT NULL REFERENCES work_assets(id) ON DELETE CASCADE,
+    source_version_id    BIGINT NOT NULL REFERENCES work_asset_versions(id) ON DELETE CASCADE,
+    "trigger"            TEXT NOT NULL DEFAULT 'manual',
+    status               TEXT NOT NULL DEFAULT 'queued',
+    draft_card           JSONB NOT NULL DEFAULT '{}',
+    draft_openapi        JSONB NOT NULL DEFAULT '{}',
+    error                TEXT NOT NULL DEFAULT '',
+    confirmed_version_id BIGINT REFERENCES work_asset_versions(id) ON DELETE SET NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_work_asset_organizations_trigger
+        CHECK ("trigger" IN ('manual','automatic')),
+    CONSTRAINT ck_work_asset_organizations_status
+        CHECK (status IN ('queued','processing','draft','failed','confirmed','discarded'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_asset_organizations_automatic
+    ON work_asset_organizations(owner_key, asset_id, source_version_id, "trigger")
+    WHERE "trigger" = 'automatic';
+CREATE INDEX IF NOT EXISTS idx_work_asset_organizations_asset
+    ON work_asset_organizations(asset_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_asset_organizations_queue
+    ON work_asset_organizations(status, created_at)
+    WHERE status IN ('queued','processing');
+ALTER TABLE work_asset_versions
+    DROP CONSTRAINT IF EXISTS work_asset_versions_organization_id_fkey;
+ALTER TABLE work_asset_versions
+    ADD CONSTRAINT work_asset_versions_organization_id_fkey
+    FOREIGN KEY (organization_id) REFERENCES work_asset_organizations(id) ON DELETE SET NULL;
+DROP TRIGGER IF EXISTS trg_work_asset_organizations_upd ON work_asset_organizations;
+CREATE TRIGGER trg_work_asset_organizations_upd BEFORE UPDATE ON work_asset_organizations
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS work_asset_chunks (
     id               BIGSERIAL PRIMARY KEY,

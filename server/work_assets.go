@@ -170,6 +170,7 @@ func (s *Server) workCreateAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asset, _ = pg.GetWorkAsset(r.Context(), asset.ID)
+	s.queueAutomaticWorkAssetOrganization(r.Context(), pg, asset, version.ID)
 	writeJSON(w, 201, asset)
 }
 
@@ -549,6 +550,9 @@ func (s *Server) workUploadAssetVersion(w http.ResponseWriter, r *http.Request) 
 	input.ParseStatus, input.Summary, input.Keywords = parsed.Status, parsed.Summary, parsed.Keywords
 	input.ParseError = mapString(parsed.Metadata, "parse_error")
 	updated, err := pg.UpdateWorkAsset(r.Context(), id, input)
+	if err == nil {
+		s.queueAutomaticWorkAssetOrganization(r.Context(), pg, updated, version.ID)
+	}
 	writeWorkItem(w, updated, err)
 }
 
@@ -609,6 +613,9 @@ func (s *Server) workReparseAsset(w http.ResponseWriter, r *http.Request) {
 	input.ParseStatus, input.Summary, input.Keywords = parsed.Status, parsed.Summary, parsed.Keywords
 	input.ParseError = mapString(parsed.Metadata, "parse_error")
 	updated, err := pg.UpdateWorkAsset(r.Context(), id, input)
+	if err == nil {
+		s.queueAutomaticWorkAssetOrganization(r.Context(), pg, updated, version.ID)
+	}
 	writeWorkItem(w, updated, err)
 }
 
