@@ -117,14 +117,17 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		if lifecycle.Paused {
 			return out, fmt.Errorf("任务已经暂停")
 		}
-		wasQueued := lifecycle.Queued
 		wasEnginePaused := s.engine.IsPaused(t.ID)
 		if pauseCause == nil {
 			pauseCause = agent.AbortPausedByUser
 		}
 		s.engine.Pause(t.ID, pauseCause)
 		if err := s.m.ApplyTaskPause(t.ID); err != nil {
-			if !wasEnginePaused && !wasQueued {
+			// 回滚必须无条件恢复到暂停前的引擎状态。原先只在"既没暂停过、也不是排队中"
+			// 时才 Resume，于是排队中的任务一旦落库失败就会卡死：引擎的 paused 标记留着，
+			// execContextFor 之后每次发出去的都是已取消的 ctx，而生命周期状态又不是
+			// paused，用户连"继续"都点不了——任务静默不跑。
+			if !wasEnginePaused {
 				s.engine.Resume(t)
 			}
 			return out, err
