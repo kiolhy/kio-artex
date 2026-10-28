@@ -154,6 +154,10 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			usage       llm.Usage
 			stopReason  string
 			streamErr   error
+			// 空响应重试状态（见 emptyretry.go）。必须在 finish 之前声明：finish 的
+			// 闭包要读它们来决定 metering 的 status。
+			sawContent bool // 任何一次尝试里出现过内容事件
+			retried    bool // 是否真的重试过
 		)
 
 		finished := false
@@ -163,8 +167,15 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			}
 			finished = true
 			status := "ok"
-			if err != nil {
+			switch {
+			case err != nil:
 				status = "error"
+			case !sawContent:
+				// 空响应：provider 正常收尾但没有任何正文/思考/工具调用。这条 status
+				// 就是「这轮是空回合」的落库标记，统计页可直接筛出来。
+				status = "empty"
+			case retried:
+				status = "ok-retry"
 			}
 			// Lightweight metering row — always written.
 			r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
@@ -175,44 +186,110 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 		}
 		defer func() { finish(ctx.Err()) }()
 
-		for ev, err := range r.inner.Stream(ctx, req) {
+		// pending 缓存"第一个内容事件之前"的元数据事件（message_start/message_delta）。
+		// 空响应时这些事件会连同整条流一起丢弃重来；一旦见到内容就 flush 并转为直通，
+		// 所以正常响应的流式体验完全不变。
+		var pending []llm.StreamEvent
+		flushed := false
+		flushPending := func() bool {
+			for _, b := range pending {
+				if !yield(b, nil) {
+					pending = nil
+					flushed = true
+					return false
+				}
+			}
+			pending = nil
+			flushed = true
+			return true
+		}
+
+		// runOnce 跑一次底层流。返回 (错误, 消费方是否已放弃)。
+		runOnce := func(rq llm.CompletionRequest) (error, bool) {
+			for ev, err := range r.inner.Stream(ctx, rq) {
+				if err != nil {
+					// 先把缓冲的元数据吐出去，再吐错误——否则调用方会看到"什么都没有"，
+					// 连 message_start 都没有，反而更难判断是哪一层出的问题。
+					if !flushed && !flushPending() {
+						return err, true
+					}
+					return err, !yield(ev, err)
+				}
+				// Always track usage (cheap); accumulate text/thinking only for bodies.
+				// Anthropic (and the other providers) split token usage across events:
+				// message_start carries ONLY the input side (input + cache), message_delta
+				// ONLY the output. They must be FOLDED with Add — overwriting on delta
+				// would zero out the input already counted at start (mirrors the SDK's own
+				// llm.Accumulator; see norma/llm/accumulate.go).
+				switch ev.Type {
+				case llm.SETextDelta:
+					if recordBodies {
+						textBuf.WriteString(ev.Text)
+					}
+				case llm.SEThinkingDelta:
+					if recordBodies {
+						thinkingBuf.WriteString(ev.Text)
+					}
+				case llm.SEMessageStart:
+					usage.Add(ev.Usage)
+				case llm.SEMessageDelta:
+					if ev.StopReason != "" {
+						stopReason = ev.StopReason
+					}
+					usage.Add(ev.Usage)
+				}
+
+				if flushed {
+					if !yield(ev, nil) {
+						return nil, true
+					}
+					continue
+				}
+				if isContentEvent(ev) {
+					sawContent = true
+					if !flushPending() {
+						return nil, true
+					}
+					if !yield(ev, nil) {
+						return nil, true
+					}
+					continue
+				}
+				pending = append(pending, ev)
+			}
+			return nil, false
+		}
+
+		for attempt := 1; ; attempt++ {
+			rq := req
+			if attempt > 1 {
+				var ok bool
+				if rq, ok = doubleMaxTokens(req); !ok {
+					break // 没有输出上限可翻倍，重试没有意义
+				}
+			}
+			err, stopped := runOnce(rq)
+			if stopped {
+				return
+			}
 			if err != nil {
 				streamErr = err
 				finish(streamErr)
-				if !yield(ev, err) {
-					return
-				}
 				return
 			}
-			// Always track usage (cheap); accumulate text/thinking only for bodies.
-			// Anthropic (and the other providers) split token usage across events:
-			// message_start carries ONLY the input side (input + cache), message_delta
-			// ONLY the output. They must be FOLDED with Add — overwriting on delta
-			// would zero out the input already counted at start (mirrors the SDK's own
-			// llm.Accumulator; see norma/llm/accumulate.go).
-			switch ev.Type {
-			case llm.SETextDelta:
-				if recordBodies {
-					textBuf.WriteString(ev.Text)
-				}
-			case llm.SEThinkingDelta:
-				if recordBodies {
-					thinkingBuf.WriteString(ev.Text)
-				}
-			case llm.SEMessageStart:
-				usage.Add(ev.Usage)
-			case llm.SEMessageDelta:
-				if ev.StopReason != "" {
-					stopReason = ev.StopReason
-				}
-				usage.Add(ev.Usage)
+			// 流正常结束：有内容、或已经重试过、或功能被关掉，都到此为止。
+			if sawContent || attempt >= 2 || !emptyRetryEnabled() {
+				break
 			}
-			if !yield(ev, err) {
-				return
-			}
+			retried = true
+			pending = nil // 丢掉空响应那一轮的元数据事件，避免重复
+			log.Printf("[llm] 空响应（无正文/无思考/无工具调用），max_tokens 翻倍后重试一次：model=%s profile=%s", r.model, r.prof)
 		}
 
-		// Stream completed normally.
+		// 最终仍是空响应时，把它那点元数据事件原样交给调用方（保持与原实现一致）。
+		if !flushed {
+			flushPending()
+		}
 		finish(streamErr)
 	}
 }
@@ -241,9 +318,30 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	}
 
 	msg, stopReason, usage, err := r.inner.Complete(ctx, req)
+	retried := false
+	// 空响应重试（同 Stream，见 emptyretry.go）：非流式路径下"合法但空"的响应同样
+	// 会让上层白跑一个回合。
+	if err == nil && !messageHasContent(msg) && emptyRetryEnabled() {
+		if rq, ok := doubleMaxTokens(req); ok {
+			retried = true
+			log.Printf("[llm] 空响应（无正文/无思考/无工具调用），max_tokens 翻倍后重试一次：model=%s profile=%s", r.model, r.prof)
+			msg2, sr2, usage2, err2 := r.inner.Complete(ctx, rq)
+			usage.Add(usage2) // 两次都真实计费，token 统计必须合并
+			if err2 == nil {
+				msg, stopReason, err = msg2, sr2, nil
+			} else {
+				err = err2
+			}
+		}
+	}
 	status := "ok"
-	if err != nil {
+	switch {
+	case err != nil:
 		status = "error"
+	case !messageHasContent(msg):
+		status = "empty"
+	case retried:
+		status = "ok-retry"
 	}
 	r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
 	if recordBodies {

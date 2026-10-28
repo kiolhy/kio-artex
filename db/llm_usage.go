@@ -23,7 +23,7 @@ type LLMUsage struct {
 	OutputTokens  int    `json:"output_tokens"`
 	CacheRead     int    `json:"cache_read"`
 	CacheWrite    int    `json:"cache_write"`
-	Status        string `json:"status"` // ok | error
+	Status        string `json:"status"` // ok | ok-retry | empty | error（empty = provider 正常收尾但没有任何内容，见 llmrec/emptyretry.go）
 }
 
 const llmUsageSchema = `

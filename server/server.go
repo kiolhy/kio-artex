@@ -413,7 +413,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
-	cfg.ThinkingType = p.ThinkingType
+	cfg.ThinkingType = agent.NormalizeThinking(string(cfg.Format), cfg.Model, p.ThinkingType)
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
@@ -584,7 +584,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
-	cfg.ThinkingType = p.ThinkingType
+	cfg.ThinkingType = agent.NormalizeThinking(string(cfg.Format), cfg.Model, p.ThinkingType)
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
