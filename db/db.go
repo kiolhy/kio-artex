@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -292,6 +293,11 @@ ON CONFLICT (name) DO NOTHING`,
 	}
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
+	}
+	// 表级 autovacuum 调优（见 autovacuum.go）。放在最后：要等各表的 Ensure* 都跑过，
+	// 否则表还不存在只能跳过。全程 best-effort，不阻塞启动。
+	if err := d.TuneHotTables(); err != nil {
+		log.Printf("[db] autovacuum 调优失败（已忽略）：%v", err)
 	}
 	return nil
 }
