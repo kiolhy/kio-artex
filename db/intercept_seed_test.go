@@ -44,3 +44,47 @@ func TestDeleteEndpointPathPattern(t *testing.T) {
 		}
 	}
 }
+
+// 「删除系统关键目录」的误拦回归测试（二开 gthubtom1 d07bf2a）。
+// 老正则里的 `/` 分支命中任何绝对路径，且 {0,60} 会跨过 && 继续往后找，
+// 于是 `rm -f /tmp/x && curl -o /dev/null http://t/` 这种无害清理被直接 deny。
+func TestRmSystemPathPattern(t *testing.T) {
+	re := regexp.MustCompile(rmSystemPathPattern)
+
+	hit := []string{
+		`{"command":"rm -rf /"}`,
+		`{"command":"rm -rf /etc"}`,
+		`{"command":"rm -f /etc/passwd"}`,
+		`{"command":"rm /var/log/syslog"}`,
+		`{"command":"rm -rf '/usr/lib'"}`, // 带引号的操作数
+		`{"command":"rm -f /boot/vmlinuz"}`,
+		`{"command":"rm -f /dev/sda"}`,
+		`{"command":"cd /tmp && rm -rf /sys/kernel"}`,
+	}
+	for _, s := range hit {
+		if !re.MatchString(s) {
+			t.Errorf("应命中却放行: %s", s)
+		}
+	}
+
+	miss := []string{
+		// 老正则误拦的典型组合：rm 清理 + 后续命令里的绝对路径
+		`{"command":"rm -f /tmp/x && curl -o /dev/null http://t/"}`,
+		`{"command":"rm -rf ./build && python3 /opt/tools/x.py"}`,
+		`{"command":"rm -f /tmp/scan.txt; curl -s http://t/api"}`,
+		// 普通任务目录清理
+		`{"command":"rm -f out.json"}`,
+		`{"command":"rm -rf ./payloads"}`,
+		`{"command":"rm -f /tmp/a.txt"}`,
+		`{"command":"rm -f \"$HOME/x\""}`,
+		// 名字里含系统目录名但不是系统路径
+		`{"command":"rm -f /tmp/etc-backup.tar"}`,
+		`{"command":"rm -f ./var.txt"}`,
+		`{"command":"ls -la /etc"}`,
+	}
+	for _, s := range miss {
+		if re.MatchString(s) {
+			t.Errorf("误拦: %s", s)
+		}
+	}
+}

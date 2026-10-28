@@ -287,6 +287,9 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultInterceptRulesV3(); err != nil {
 		return fmt.Errorf("seed intercept rules v3: %w", err)
 	}
+	if err := d.seedDefaultInterceptRulesV4(); err != nil {
+		return fmt.Errorf("seed intercept rules v4: %w", err)
+	}
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
 	}
@@ -390,6 +393,30 @@ WHERE key=$1 AND name=$2 AND COALESCE(description,'')=$5`,
 	return d.SetSetting(flag, "done")
 }
 
+// rmSystemPathPattern 匹配「rm 的操作数是系统关键路径」。
+//
+// 为什么不能沿用老写法 `\brm\b[^"'\n]{0,60}["'\s](/|/etc|...)`（二开 gthubtom1
+// d07bf2a 的发现）：那条正则里的 `/` 分支会命中**任何**绝对路径，而且
+// `[^"'\n]{0,60}` 会跨过 `&&`/`;` 继续往后找，于是
+//
+//	rm -f /tmp/x && curl -o /dev/null http://t/
+//
+// 这种完全无害的清理命令也被判成"删除系统关键路径"直接 deny，Agent 在任务目录里
+// 做正常清理时会被反复挡住。
+//
+// 现在的写法：
+//   - 只扫 rm 这一段命令（遇到 | ; & 换行就停，不再跨命令）；
+//   - 路径必须是系统根或系统目录，且后面跟 / 空白 引号 或结尾，
+//     所以 /tmp/x、/dev/null 之外的 /dev/xxx 仍按系统路径处理，而 /tmp 不受影响；
+//   - 单独的 `/`（删根）单独兜住。
+//
+// 导出为包级常量只为让内置正则能脱离数据库单测（同 deleteEndpointPathPattern）。
+const rmSystemPathPattern = `(?i)\brm\b[^|;&\n]{0,80}?(?:^|\s)["']?(?:/(?:etc|bin|sbin|usr|boot|lib|lib64|sys|proc|dev|var|root|opt|srv)(?:/|\s|["']|$)|/(?:\s|["']|$))`
+
+// legacyRmSystemPathPattern 是 v1 内置规则里那条有误拦问题的正则原文。
+// v4 迁移只在库里的值**仍等于它**时才覆盖，用户自己改过的一律不动。
+const legacyRmSystemPathPattern = `\brm\b[^"'\n]{0,60}["'\s](/|/etc|/bin|/usr|/boot|/var|/lib|/sys|/proc|/dev|/sbin|/root)`
+
 // seedDefaultInterceptRules inserts built-in safety intercept rules once on
 // first startup. The seed is gated by a settings flag so user edits (disable,
 // delete, re-order) are never overwritten on subsequent restarts.
@@ -421,7 +448,7 @@ func (d *DB) seedDefaultInterceptRules() error {
 			name:     "[内置] 删除系统关键目录",
 			target:   "tool_input",
 			typ:      "regex",
-			pattern:  `\brm\b[^"'\n]{0,60}["'\s](/|/etc|/bin|/usr|/boot|/var|/lib|/sys|/proc|/dev|/sbin|/root)`,
+			pattern:  rmSystemPathPattern,
 			action:   "deny",
 			message:  "禁止删除系统关键路径",
 			priority: 100,
@@ -662,4 +689,23 @@ WHERE NOT EXISTS (SELECT 1 FROM intercept_rules WHERE name = $1)`,
 		return fmt.Errorf("rule %q: %w", name, err)
 	}
 	return d.SetSetting("intercept_default_rules_v3", "done")
+}
+
+// seedDefaultInterceptRulesV4 修掉「删除系统关键目录」那条内置正则的误拦。
+//
+// 光改 v1 的种子字面量没用：v1 只跑一次，已有库里的规则还是老正则，重启也不会
+// 更新。这里做一次幂等自愈——只在库里的 pattern 仍等于 legacyRmSystemPathPattern
+// 时替换（用户自己改过的正则不覆盖），并用 v4 标记位保证只做一次。
+func (d *DB) seedDefaultInterceptRulesV4() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v4"); v == "done" {
+		return nil
+	}
+	if _, err := d.Exec(`
+UPDATE intercept_rules SET pattern = $1, message = $2
+WHERE name = $3 AND pattern = $4`,
+		rmSystemPathPattern, "禁止删除系统关键路径", "[内置] 删除系统关键目录", legacyRmSystemPathPattern,
+	); err != nil {
+		return fmt.Errorf("rule 删除系统关键目录: %w", err)
+	}
+	return d.SetSetting("intercept_default_rules_v4", "done")
 }
