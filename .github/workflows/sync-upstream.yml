@@ -1,0 +1,104 @@
+name: sync-upstream
+
+# 定期把上游正式版合进来，但**只开 PR、不直接动主干**。
+#
+# 为什么必须是 PR：上游改的是同一批文件（agent/、server/、db/schema.sql），自动合并
+# 冲突时静默选一边就可能把本地的安全加固（回环监听、证书校验、子进程凭据摘除、
+# 拦截规则覆盖）覆盖掉。让人在 PR 里看一眼 diff，比"每天自动同步、某天发现加固没了"
+# 便宜得多。
+#
+# 触发：
+#   - 每周一 03:17 UTC（北京 11:17）自动跑；
+#   - 也可以在 Actions 页面手动触发，并可指定上游 tag/branch。
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 上游 ref（tag 或分支，默认 main）
+        required: false
+        default: main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: Autumn-27/artex
+      UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'main' }}
+      SYNC_BRANCH: chore/sync-upstream
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 需要完整历史才能算 merge-base
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_REF}"
+          echo "上游 HEAD: $(git rev-parse --short FETCH_HEAD)"
+
+      - name: Check if already up to date
+        id: check
+        run: |
+          base="$(git merge-base HEAD FETCH_HEAD)"
+          if [ "$base" = "$(git rev-parse FETCH_HEAD)" ]; then
+            echo "已包含上游全部提交，无需同步"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "落后上游 $(git rev-list --count HEAD..FETCH_HEAD) 个提交"
+          fi
+
+      - name: Merge upstream into sync branch
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${SYNC_BRANCH}"
+          # --no-ff 保留"这是一次上游同步"的语义，回溯时一眼能看出来。
+          # 冲突就让 job 失败：宁可在 CI 里红，也不要把冲突结果推上去。
+          git merge --no-ff --no-edit FETCH_HEAD
+
+      - name: Setup Go
+        if: steps.check.outputs.needed == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Verify build
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          # 上游可能改了 web/ 或依赖；只做编译与单测，不跑需要数据库的用例。
+          go build ./...
+          go vet ./...
+          go test ./agent/ ./guard/ ./intercept/ ./selfupdate/ ./traffic/ ./internal/... 2>&1 | tail -n 40
+
+      - name: Open PR
+        if: steps.check.outputs.needed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ env.SYNC_BRANCH }}
+          base: main
+          title: "chore: 同步上游 ${{ env.UPSTREAM_REPO }}@${{ env.UPSTREAM_REF }}"
+          body: |
+            自动同步上游提交。
+
+            **合并前请逐条确认本地加固没有被覆盖：**
+            - [ ] 管理面默认只监听回环（`cmd/artex/listen.go`、`docker-compose.yml` 端口绑定）
+            - [ ] 录制代理默认校验证书、证书错误不再被透传掩盖（`traffic/traffic.go`）
+            - [ ] Agent 子进程环境里已摘掉平台凭据（`internal/envfilter`、`agent/*.go` 的 `bashEnv`）
+            - [ ] 拦截规则 v1 系统路径正则 + v4 幂等自愈（`db/db.go`）
+            - [ ] planner / 主 Agent / 目标拆解仍挂着拦截钩子（`SetHooks`、`server/task_guard.go`）
+            - [ ] 空响应重试与 thinking 归一化仍在（`llmrec/emptyretry.go`、`agent/thinking.go`）
+
+            `scripts/verify.sh --no-db` 已在此分支跑过 build/vet/无库单测。
+          labels: upstream-sync
+          delete-branch: true
+          commit-message: "chore: 同步上游 ${UPSTREAM_REPO}@${UPSTREAM_REF}"

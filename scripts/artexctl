@@ -1,0 +1,198 @@
+#!/bin/sh
+# artexctl —— 离线包里的启停脚本（不依赖 systemd / docker，内网机器直接可用）。
+#
+# 现场常见问题，这个脚本各对应一条：
+#   1. 忘了设 DSN → 直接退出并提示复制 env 模板，而不是抛一堆连接错误；
+#   2. 直接 ./artex 起在 0.0.0.0 → 默认只监听回环，要暴露自己显式开；
+#   3. 升级后起不来只能回滚手抖 → upgrade 先备份、起不来自动回滚；
+#   4. 后台跑起来后找不到日志/PID → 统一放 run/ 与 logs/。
+set -eu
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
+
+BIN="./artex"
+[ -f "./artex.exe" ] && BIN="./artex.exe"
+ENV_FILE="${ARTEX_ENV:-deploy/.env}"
+PID_FILE="run/artex.pid"
+LOG_FILE="logs/artex.log"
+HEALTH_URL_DEFAULT="http://127.0.0.1:8787/api/health"
+
+say() { printf '%s\n' "$*"; }
+die() { printf '错误：%s\n' "$*" >&2; exit 1; }
+
+load_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  # 只导出 KEY=VALUE 形式的行，注释与空行跳过；不执行文件里的任何命令。
+  while IFS= read -r line; do
+    case "$line" in
+      ''|'#'*) continue ;;
+      *=*) key="${line%%=*}"; val="${line#*=}"
+           case "$key" in
+             *[!A-Za-z0-9_]*) continue ;;
+           esac
+           # 去掉可能存在的包裹引号
+           case "$val" in
+             \"*\") val="${val#\"}"; val="${val%\"}" ;;
+             \'*\') val="${val#\'}"; val="${val%\'}" ;;
+           esac
+           export "$key=$val" ;;
+    esac
+  done < "$ENV_FILE"
+}
+
+pid_of() {
+  [ -f "$PID_FILE" ] || return 1
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [ -n "${pid:-}" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s' "$pid"
+}
+
+health_url() {
+  port="${ARTEX_PORT:-8787}"
+  printf 'http://127.0.0.1:%s/api/health' "$port"
+}
+
+wait_healthy() {
+  url="$(health_url)"
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsS "$url" >/dev/null 2>&1 && return 0
+    else
+      # 没有 curl 时退化成"进程还活着"这一弱判定，并明确告知。
+      pid_of >/dev/null 2>&1 && return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+cmd_start() {
+  if pid="$(pid_of)"; then
+    say "已在运行（pid ${pid}），日志：${LOG_FILE}"
+    return 0
+  fi
+  [ -x "$BIN" ] || die "找不到可执行文件 $BIN"
+  load_env
+  if [ -z "${ARTEX_PG_DSN:-}" ]; then
+    die "未设置 ARTEX_PG_DSN。先 cp deploy/.env.offline.example deploy/.env 并填好数据库连接"
+  fi
+  mkdir -p run logs
+  say "启动 ARTEX（env: ${ENV_FILE}）…"
+  nohup "$BIN" >>"$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+  if wait_healthy; then
+    say "已启动：pid $(cat "$PID_FILE")，健康检查 $(health_url) 通过"
+    say "管理面默认只监听回环；需要局域网访问请设 ARTEX_BIND_HOST=0.0.0.0 并自行做访问控制"
+  else
+    say "启动后 30 秒内健康检查未通过，最近日志："
+    tail -n 40 "$LOG_FILE" 2>/dev/null || true
+    cmd_stop >/dev/null 2>&1 || true
+    exit 1
+  fi
+}
+
+cmd_stop() {
+  if ! pid="$(pid_of)"; then
+    say "未在运行"
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  say "停止 pid ${pid} …"
+  kill "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 20 ]; do
+    kill -0 "$pid" 2>/dev/null || { rm -f "$PID_FILE"; say "已停止"; return 0; }
+    sleep 1
+    i=$((i + 1))
+  done
+  say "20 秒内未退出，发送 SIGKILL"
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PID_FILE"
+}
+
+cmd_status() {
+  if pid="$(pid_of)"; then
+    say "运行中（pid ${pid}）"
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fsS "$(health_url)" >/dev/null 2>&1; then
+        say "健康检查：通过（$(health_url)）"
+      else
+        say "健康检查：失败（$(health_url)）"
+        exit 1
+      fi
+    fi
+  else
+    say "未运行"
+    exit 3
+  fi
+}
+
+cmd_logs() {
+  [ -f "$LOG_FILE" ] || die "还没有日志文件 ${LOG_FILE}"
+  tail -n "${1:-100}" -f "$LOG_FILE"
+}
+
+# upgrade <新二进制路径>：先停、备份旧件、换新、起不来自动回滚。
+cmd_upgrade() {
+  [ "$#" -ge 1 ] || die "用法：artexctl upgrade /path/to/new/artex"
+  new="$1"
+  [ -f "$new" ] || die "找不到新二进制：$new"
+  if [ -f "${new}.sha256" ] && command -v sha256sum >/dev/null 2>&1; then
+    want="$(awk '{print $1}' "${new}.sha256" | head -n 1)"
+    got="$(sha256sum "$new" | awk '{print $1}')"
+    [ "$want" = "$got" ] || die "校验和不匹配：期望 ${want}，实际 ${got}"
+    say "校验和通过"
+  fi
+  backup="${BIN}.bak.$(date +%Y%m%d%H%M%S)"
+  cmd_stop || true
+  cp "$BIN" "$backup"
+  say "已备份旧二进制到 ${backup}"
+  cp "$new" "$BIN"
+  chmod +x "$BIN" 2>/dev/null || true
+  if cmd_start; then
+    say "升级完成"
+  else
+    say "新版本启动失败，回滚到 ${backup}"
+    cp "$backup" "$BIN"
+    cmd_start || die "回滚后仍启动失败，请查看 ${LOG_FILE}"
+    exit 1
+  fi
+}
+
+cmd_env() {
+  if [ -f "$ENV_FILE" ]; then say "已存在 ${ENV_FILE}"; return 0; fi
+  cp deploy/.env.offline.example "$ENV_FILE"
+  say "已生成 ${ENV_FILE}，请填写 ARTEX_PG_DSN 与模型配置"
+}
+
+cmd="${1:-}"
+[ "$#" -gt 0 ] && shift || true
+case "$cmd" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_stop; cmd_start ;;
+  status)  cmd_status ;;
+  logs)    cmd_logs "$@" ;;
+  upgrade) cmd_upgrade "$@" ;;
+  env)     cmd_env ;;
+  ''|-h|--help|help)
+    cat <<'EOF'
+artexctl —— ARTEX 离线包启停脚本
+
+  ./artexctl env                 从模板生成 deploy/.env
+  ./artexctl start               后台启动并做健康检查
+  ./artexctl stop                停止
+  ./artexctl restart             重启
+  ./artexctl status              查看状态（未运行时退出码 3）
+  ./artexctl logs [行数]         跟踪日志（默认 100 行）
+  ./artexctl upgrade <二进制>     换二进制，带校验和验证与失败回滚
+
+环境变量：ARTEX_ENV 指定 env 文件（默认 deploy/.env）
+EOF
+    ;;
+  *) die "未知子命令：${cmd}（./artexctl help 查看用法）" ;;
+esac
