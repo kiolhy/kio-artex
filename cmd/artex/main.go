@@ -52,17 +52,39 @@ func main() {
 
 func run() int {
 	var (
-		addr    = flag.String("addr", ":8787", "HTTP listen address")
+		addr    = flag.String("addr", "127.0.0.1:8787", "HTTP listen address (默认只监听本机；要对外请设 ARTEX_ALLOW_REMOTE_ACCESS=1)")
 		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
 		proxy   = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
 	)
 	flag.Parse()
 
+	// 只有调用方显式传了 -addr 才认为"用户自己决定监听哪里"；否则按
+	// ARTEX_PORT / ARTEX_ALLOW_REMOTE_ACCESS 推导。见 listen.go。
+	addrSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "addr" {
+			addrSet = true
+		}
+	})
+	listen, err := resolveListen(*addr, addrSet, os.Getenv)
+	if err != nil {
+		log.Fatalf("[config] %v", err)
+	}
+	proxyAddr, err := resolveProxyAddr(*proxy, flagWasSet("proxy"), os.Getenv)
+	if err != nil {
+		log.Fatalf("[config] %v", err)
+	}
+	*proxy = proxyAddr
+
 	// hand the build version to the server package so GET /api/health can report it
 	// to the frontend top bar.
 	server.BuildVersion = version
 
-	printBanner(*addr)
+	printBanner(listen.Addr)
+	log.Printf("[config] 监听地址 %s（来源：%s）", listen.Addr, listen.Source)
+	if listen.Remote {
+		log.Printf("[config] 警告：管理面已对外监听，登录/任务/工具执行均可达。仅应在可信网络使用，建议前面套反代与访问控制")
+	}
 
 	// capture backend logs into the in-memory sink (still to stderr) so the /logs
 	// page can show a live log stream. Do this first, to catch startup logs too.
@@ -114,13 +136,13 @@ func run() int {
 	log.Printf("[config] skill 目录: %s", skillDir)
 	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
 	httpSrv := &http.Server{
-		Addr:              *addr,
+		Addr:              listen.Addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
-		log.Printf("ARTEX %s backend listening on %s (data=%s, workers=%d)", version, *addr, *dataDir, mgr.Workers())
+		log.Printf("ARTEX %s backend listening on %s (data=%s, workers=%d)", version, listen.Addr, *dataDir, mgr.Workers())
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("serve: %v", err)
 		}
