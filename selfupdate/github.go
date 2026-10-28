@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -105,7 +106,13 @@ func FetchLatest(ctx context.Context, c *http.Client) (*Release, error) {
 	switch {
 	case resp.StatusCode == http.StatusForbidden, resp.StatusCode == http.StatusTooManyRequests:
 		// 未认证的 GitHub API 是每 IP 每小时 60 次，共用出口 IP 时很容易撞上。
-		return nil, fmt.Errorf("GitHub 接口限流（每小时 60 次），请稍后再试")
+		// 限流时改读 releases.atom（不吃 API 配额），见 feed.go。
+		if rel, ferr := fetchLatestFromFeed(ctx, c); ferr == nil {
+			log.Printf("[selfupdate] GitHub 接口限流，已改用 releases.atom 获取最新版本: %s", rel.TagName)
+			return rel, nil
+		} else {
+			return nil, fmt.Errorf("GitHub 接口限流（每小时 60 次），releases.atom 回退也失败（%v），请稍后再试或配置全局代理", ferr)
+		}
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, fmt.Errorf("仓库 %s 尚未发布任何正式版本", Repo)
 	case resp.StatusCode != http.StatusOK:
