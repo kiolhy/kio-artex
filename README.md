@@ -1,6 +1,6 @@
 <div align="center">
 
-# ARTEX
+# ARTEX · kio-artex
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
