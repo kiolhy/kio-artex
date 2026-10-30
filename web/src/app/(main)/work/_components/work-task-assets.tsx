@@ -2,9 +2,13 @@
 
 import * as React from "react";
 import {
+  Activity,
   Check,
+  CheckCircle2,
   ChevronDown,
   CircleSlash2,
+  Clock3,
+  Code2,
   ExternalLink,
   FileImage,
   FileSpreadsheet,
@@ -14,8 +18,10 @@ import {
   Pin,
   RefreshCw,
   Search,
+  ShieldCheck,
   Sparkles,
   TriangleAlert,
+  XCircle,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -26,6 +32,7 @@ import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import type {
   WorkAsset,
+  WorkAssetAPICall,
   WorkAssetChunk,
   WorkTaskAssetCandidate,
   WorkTaskAssetRun,
@@ -68,6 +75,10 @@ export function WorkTaskAssetsPanel({
   const [excludedIDs, setExcludedIDs] = React.useState<number[]>(initialExcluded);
   const [relations, setRelations] = React.useState<WorkTaskAssets | null>(null);
   const [runs, setRuns] = React.useState<WorkTaskAssetRun[]>([]);
+  const [apiCalls, setApiCalls] = React.useState<WorkAssetAPICall[]>([]);
+  const [apiCallsLoading, setApiCallsLoading] = React.useState(false);
+  const [apiCallsError, setApiCallsError] = React.useState<string>();
+  const [apiCallsReloadKey, setApiCallsReloadKey] = React.useState(0);
   const [allAssets, setAllAssets] = React.useState<WorkAsset[]>([]);
   const [query, setQuery] = React.useState("");
   const [loading, setLoading] = React.useState(true);
@@ -137,6 +148,32 @@ export function WorkTaskAssetsPanel({
       alive = false;
     };
   }, [reloadKey, taskId]);
+
+  React.useEffect(() => {
+    if (!taskId) {
+      setApiCalls([]);
+      setApiCallsLoading(false);
+      setApiCallsError(undefined);
+      return;
+    }
+    let alive = true;
+    setApiCallsLoading(true);
+    setApiCallsError(undefined);
+    void api
+      .workTaskAssetAPICalls(taskId)
+      .then((items) => {
+        if (alive) setApiCalls(items);
+      })
+      .catch((cause: Error) => {
+        if (alive) setApiCallsError(cause.message || "接口调用审计读取失败");
+      })
+      .finally(() => {
+        if (alive) setApiCallsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [apiCallsReloadKey, taskId]);
 
   const candidates = React.useMemo(() => {
     if (relations) {
@@ -413,16 +450,37 @@ export function WorkTaskAssetsPanel({
           ) : (
             <div className="space-y-2 pb-1 pt-1">
               {runs.map((run) => (
-                <article key={run.id} className="rounded-xl border bg-white/70 p-3">
+                <article key={run.id} className="min-w-0 rounded-xl border bg-white/70 p-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <AssetTypeIcon type={run.asset_type} />
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">{run.asset_title}</span>
                     <Badge variant="outline">v{run.version_number}</Badge>
-                    <Badge variant="outline">{run.source}</Badge>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        run.content_origin === "ai_organized" &&
+                          "border-violet-500/30 bg-violet-500/10 text-violet-700",
+                      )}
+                    >
+                      {run.content_origin === "ai_organized" ? (
+                        <Sparkles className="mr-1 size-3" />
+                      ) : (
+                        <FileText className="mr-1 size-3" />
+                      )}
+                      {run.content_origin === "ai_organized" ? "AI 整理版" : "原始资料"}
+                    </Badge>
+                    <Badge variant="outline">{run.source || "自动选择"}</Badge>
                   </div>
                   <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
                     {run.selection_reason || "由执行器自动选择"}
                   </p>
+                  {run.content_origin === "ai_organized" && (
+                    <p className="mt-1 break-words text-xs leading-5 text-violet-700">
+                      AI 整理确认版本
+                      {run.organization_id ? ` #${run.organization_id}` : ""}
+                      {run.confirmed_at ? ` · ${formatAuditTime(run.confirmed_at)}` : ""}
+                    </p>
+                  )}
                   {run.content_preview && (
                     <p className="mt-2 line-clamp-4 whitespace-pre-wrap rounded-lg bg-muted/50 p-2 text-xs leading-5">
                       {run.content_preview}
@@ -434,6 +492,131 @@ export function WorkTaskAssetsPanel({
                       引用 {run.chunk_ids.length} 个冻结片段
                     </p>
                   )}
+                  {run.operations.length > 0 && (
+                    <div className="mt-3 space-y-1.5 border-t border-violet-500/15 pt-2">
+                      <p className="flex items-center gap-1.5 text-xs font-medium text-violet-800">
+                        <Code2 className="size-3.5" />
+                        冻结的接口操作 · {run.operations.length}
+                      </p>
+                      {run.operations.map((operation) => (
+                        <div
+                          key={`${run.id}-${operation.operation_id}`}
+                          className="flex min-w-0 flex-wrap items-center gap-1.5 rounded-lg bg-violet-500/[0.06] px-2 py-1.5 text-xs"
+                        >
+                          <Badge variant="outline" className="font-mono text-[11px]">
+                            {operation.method}
+                          </Badge>
+                          <span className="min-w-0 flex-1 break-all font-mono text-[11px]">
+                            {operation.path}
+                          </span>
+                          {operation.write && (
+                            <Badge className="border-amber-500/30 bg-amber-500/10 text-amber-800" variant="outline">
+                              写操作
+                            </Badge>
+                          )}
+                          <span className="basis-full break-words text-muted-foreground">
+                            {operation.summary || operation.operation_id}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </details>
+      )}
+
+      {taskId && (
+        <details className="rounded-xl border bg-background/65 px-3 py-2" open={apiCalls.length > 0}>
+          <summary className="flex min-h-10 cursor-pointer list-none items-center justify-between gap-2 text-sm">
+            <span className="flex items-center gap-2 font-medium">
+              <ShieldCheck className="size-4 text-emerald-700" />
+              接口调用审计 · {apiCalls.length}
+            </span>
+            <ChevronDown className="size-4 text-muted-foreground" />
+          </summary>
+          {apiCallsLoading ? (
+            <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              正在读取调用记录...
+            </div>
+          ) : apiCallsError ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-2 text-xs text-destructive">
+              <span className="min-w-0 break-words">{apiCallsError}</span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-10 rounded-xl"
+                onClick={() => setApiCallsReloadKey((value) => value + 1)}
+              >
+                重试
+              </Button>
+            </div>
+          ) : apiCalls.length === 0 ? (
+            <p className="pb-2 text-xs leading-5 text-muted-foreground">
+              本次执行尚未调用接口。确认后的接口资料由 Agent 按需调用，每次调用都会记录在这里。
+            </p>
+          ) : (
+            <div className="space-y-2 pb-1 pt-1">
+              {apiCalls.map((call) => (
+                <article
+                  key={call.id}
+                  className="min-w-0 rounded-xl border bg-white/75 p-3 text-xs shadow-sm"
+                >
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <Badge variant="outline" className="font-mono">
+                      {call.method}
+                    </Badge>
+                    <span className="min-w-0 flex-1 break-all font-medium">{call.operation_id}</span>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        call.success
+                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700"
+                          : "border-destructive/30 bg-destructive/10 text-destructive",
+                      )}
+                    >
+                      {call.success ? (
+                        <CheckCircle2 className="mr-1 size-3" />
+                      ) : (
+                        <XCircle className="mr-1 size-3" />
+                      )}
+                      HTTP {call.status_code || "—"}
+                    </Badge>
+                  </div>
+                  <p className="mt-2 break-all rounded-lg bg-muted/45 px-2 py-1.5 font-mono text-[11px] leading-5">
+                    {call.host}
+                    {call.path}
+                  </p>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <Clock3 className="size-3" />
+                      {call.duration_ms} ms
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Activity className="size-3" />
+                      资产版本 #{call.asset_version_id}
+                    </span>
+                    <span>{formatAuditTime(call.created_at)}</span>
+                  </div>
+                  {call.error && (
+                    <p className="mt-2 break-words rounded-lg bg-destructive/5 p-2 leading-5 text-destructive">
+                      {call.error}
+                    </p>
+                  )}
+                  {call.response_preview && (
+                    <details className="mt-2">
+                      <summary className="min-h-9 cursor-pointer text-xs font-medium text-violet-700">
+                        查看响应预览
+                      </summary>
+                      <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-950 p-2 font-mono text-[11px] leading-5 text-slate-100">
+                        {call.response_preview}
+                      </pre>
+                    </details>
+                  )}
                 </article>
               ))}
             </div>
@@ -442,4 +625,11 @@ export function WorkTaskAssetsPanel({
       )}
     </section>
   );
+}
+
+function formatAuditTime(value: string): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { hour12: false });
 }

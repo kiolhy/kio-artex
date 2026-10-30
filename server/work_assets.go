@@ -761,6 +761,20 @@ func (s *Server) workTaskAssetRuns(w http.ResponseWriter, r *http.Request) {
 	writeWorkList(w, items, err)
 }
 
+func (s *Server) workTaskAssetAPICalls(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok {
+		writeErr(w, 400, "任务 ID 无效")
+		return
+	}
+	items, err := pg.ListWorkAssetAPICalls(r.Context(), id)
+	writeWorkList(w, items, err)
+}
+
 func (s *Server) workAssetTestAPI(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -1274,6 +1288,12 @@ func applyOpenAPISecurity(httpReq *http.Request, operation openAPIOperation, ref
 					query := candidate.URL.Query()
 					query.Set(scheme.Name, value)
 					candidate.URL.RawQuery = query.Encode()
+				case "cookie":
+					if scheme.Name == "" {
+						ok = false
+						break
+					}
+					candidate.AddCookie(&http.Cookie{Name: scheme.Name, Value: value})
 				default:
 					ok = false
 				}

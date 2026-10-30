@@ -1840,6 +1840,36 @@ CREATE INDEX IF NOT EXISTS idx_work_task_asset_runs_task
 CREATE INDEX IF NOT EXISTS idx_work_task_asset_runs_artex
     ON work_task_asset_runs(artex_task_id) WHERE artex_task_id <> '';
 
+-- Auditable record of every API asset operation invoked by an Agent. Secrets,
+-- authorization headers and full response bodies are never persisted here.
+CREATE TABLE IF NOT EXISTS work_asset_api_calls (
+    id                  BIGSERIAL PRIMARY KEY,
+    owner_key           TEXT NOT NULL,
+    task_id             BIGINT REFERENCES work_tasks(id) ON DELETE CASCADE,
+    artex_task_id       TEXT NOT NULL DEFAULT '',
+    asset_id            BIGINT REFERENCES work_assets(id) ON DELETE SET NULL,
+    asset_version_id    BIGINT REFERENCES work_asset_versions(id) ON DELETE SET NULL,
+    organization_id     BIGINT REFERENCES work_asset_organizations(id) ON DELETE SET NULL,
+    operation_id        TEXT NOT NULL,
+    method              TEXT NOT NULL,
+    host                TEXT NOT NULL,
+    path                TEXT NOT NULL,
+    status_code         INTEGER NOT NULL DEFAULT 0,
+    success             BOOLEAN NOT NULL DEFAULT false,
+    duration_ms         BIGINT NOT NULL DEFAULT 0,
+    error               TEXT NOT NULL DEFAULT '',
+    response_preview    TEXT NOT NULL DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_work_asset_api_calls_owner CHECK (owner_key='ARTEX'),
+    CONSTRAINT ck_work_asset_api_calls_method CHECK (method IN ('GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'))
+);
+CREATE INDEX IF NOT EXISTS idx_work_asset_api_calls_task
+    ON work_asset_api_calls(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_asset_api_calls_artex
+    ON work_asset_api_calls(artex_task_id, created_at DESC) WHERE artex_task_id <> '';
+CREATE INDEX IF NOT EXISTS idx_work_asset_api_calls_asset
+    ON work_asset_api_calls(asset_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS work_asset_secret_refs (
     id         BIGSERIAL PRIMARY KEY,
     asset_id   BIGINT NOT NULL REFERENCES work_assets(id) ON DELETE CASCADE,

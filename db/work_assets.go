@@ -132,21 +132,66 @@ type WorkTaskAssetSelection struct {
 }
 
 type WorkTaskAssetRun struct {
-	ID             int64           `json:"id"`
-	TaskID         int64           `json:"task_id"`
-	ArtexTaskID    string          `json:"artex_task_id"`
-	AssetID        int64           `json:"asset_id"`
-	AssetTitle     string          `json:"asset_title"`
-	AssetType      string          `json:"asset_type"`
-	VersionID      int64           `json:"asset_version_id"`
-	Version        int             `json:"version_number"`
-	ChunkIDs       []int64         `json:"chunk_ids"`
-	Reason         string          `json:"selection_reason"`
-	Relevance      float64         `json:"relevance"`
-	Source         string          `json:"source"`
-	Snapshot       json.RawMessage `json:"snapshot"`
-	CreatedAt      time.Time       `json:"created_at"`
-	ContentPreview string          `json:"content_preview"`
+	ID                 int64                      `json:"id"`
+	TaskID             int64                      `json:"task_id"`
+	ArtexTaskID        string                     `json:"artex_task_id"`
+	AssetID            int64                      `json:"asset_id"`
+	AssetTitle         string                     `json:"asset_title"`
+	AssetType          string                     `json:"asset_type"`
+	VersionID          int64                      `json:"asset_version_id"`
+	Version            int                        `json:"version_number"`
+	ChunkIDs           []int64                    `json:"chunk_ids"`
+	Reason             string                     `json:"selection_reason"`
+	Relevance          float64                    `json:"relevance"`
+	Source             string                     `json:"source"`
+	Snapshot           json.RawMessage            `json:"snapshot"`
+	InternalSnapshot   json.RawMessage            `json:"-"`
+	CreatedAt          time.Time                  `json:"created_at"`
+	ContentPreview     string                     `json:"content_preview"`
+	ContentOrigin      string                     `json:"content_origin"`
+	OrganizationID     int64                      `json:"organization_id,omitempty"`
+	OrganizationStatus string                     `json:"organization_status,omitempty"`
+	ConfirmedAt        string                     `json:"confirmed_at,omitempty"`
+	SourceURL          string                     `json:"-"`
+	Card               json.RawMessage            `json:"card,omitempty"`
+	OpenAPI            json.RawMessage            `json:"openapi,omitempty"`
+	InternalAccess     bool                       `json:"internal_access"`
+	AllowedHosts       []string                   `json:"allowed_hosts"`
+	SecretAliases      []WorkAssetRunSecretRef    `json:"secret_aliases"`
+	Operations         []WorkAssetRunAPIOperation `json:"operations"`
+}
+
+type WorkAssetRunSecretRef struct {
+	Alias    string `json:"alias"`
+	Location string `json:"location"`
+	EnvName  string `json:"-"`
+}
+
+type WorkAssetRunAPIOperation struct {
+	OperationID string `json:"operation_id"`
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	Summary     string `json:"summary,omitempty"`
+	Write       bool   `json:"write"`
+}
+
+type WorkAssetAPICall struct {
+	ID              int64     `json:"id"`
+	TaskID          int64     `json:"task_id"`
+	ArtexTaskID     string    `json:"artex_task_id"`
+	AssetID         int64     `json:"asset_id"`
+	AssetVersionID  int64     `json:"asset_version_id"`
+	OrganizationID  int64     `json:"organization_id,omitempty"`
+	OperationID     string    `json:"operation_id"`
+	Method          string    `json:"method"`
+	Host            string    `json:"host"`
+	Path            string    `json:"path"`
+	StatusCode      int       `json:"status_code"`
+	Success         bool      `json:"success"`
+	DurationMS      int64     `json:"duration_ms"`
+	Error           string    `json:"error,omitempty"`
+	ResponsePreview string    `json:"response_preview,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 const workAssetCols = `a.id,a.asset_type,a.title,a.description,a.mime_type,a.file_name,a.size_bytes,
@@ -1207,6 +1252,7 @@ func applyWorkAssetRunSnapshot(run *WorkTaskAssetRun) {
 	if run == nil || len(run.Snapshot) == 0 {
 		return
 	}
+	run.InternalSnapshot = append(json.RawMessage(nil), run.Snapshot...)
 	type snapshotChunk struct {
 		ID        int64  `json:"id"`
 		AssetID   int64  `json:"asset_id"`
@@ -1217,21 +1263,36 @@ func applyWorkAssetRunSnapshot(run *WorkTaskAssetRun) {
 		Keywords  string `json:"keywords"`
 		CreatedAt string `json:"created_at"`
 	}
+	type snapshotSecretRef struct {
+		Alias    string `json:"alias"`
+		Location string `json:"location"`
+		EnvName  string `json:"env_name"`
+	}
 	var snapshot struct {
-		AssetID         int64           `json:"asset_id"`
-		Title           string          `json:"title"`
-		AssetType       string          `json:"asset_type"`
-		VersionID       int64           `json:"version_id"`
-		VersionNumber   int             `json:"version_number"`
-		Summary         string          `json:"summary"`
-		Content         string          `json:"content"`
-		SourceURL       string          `json:"source_url"`
-		SelectionReason string          `json:"selection_reason"`
-		Relevance       *float64        `json:"relevance"`
-		Source          string          `json:"source"`
-		ChunkIDs        []int64         `json:"chunk_ids"`
-		Chunks          []snapshotChunk `json:"chunks"`
-		Locators        []snapshotChunk `json:"locators"`
+		AssetID         int64                      `json:"asset_id"`
+		Title           string                     `json:"title"`
+		AssetType       string                     `json:"asset_type"`
+		VersionID       int64                      `json:"version_id"`
+		VersionNumber   int                        `json:"version_number"`
+		Summary         string                     `json:"summary"`
+		Content         string                     `json:"content"`
+		SourceURL       string                     `json:"source_url"`
+		SelectionReason string                     `json:"selection_reason"`
+		Relevance       *float64                   `json:"relevance"`
+		Source          string                     `json:"source"`
+		ChunkIDs        []int64                    `json:"chunk_ids"`
+		Chunks          []snapshotChunk            `json:"chunks"`
+		Locators        []snapshotChunk            `json:"locators"`
+		ContentOrigin   string                     `json:"content_origin"`
+		OrganizationID  int64                      `json:"organization_id"`
+		Organization    string                     `json:"organization_status"`
+		ConfirmedAt     string                     `json:"confirmed_at"`
+		Card            json.RawMessage            `json:"card"`
+		OpenAPI         json.RawMessage            `json:"openapi"`
+		InternalAccess  bool                       `json:"internal_access"`
+		AllowedHosts    []string                   `json:"allowed_hosts"`
+		SecretAliases   []snapshotSecretRef        `json:"secret_aliases"`
+		Operations      []WorkAssetRunAPIOperation `json:"operations"`
 	}
 	if json.Unmarshal(run.Snapshot, &snapshot) != nil {
 		return
@@ -1262,6 +1323,35 @@ func applyWorkAssetRunSnapshot(run *WorkTaskAssetRun) {
 	if snapshot.Source != "" {
 		run.Source = snapshot.Source
 	}
+	run.ContentOrigin = normalizeAssetContentOrigin(snapshot.ContentOrigin)
+	run.OrganizationID = snapshot.OrganizationID
+	run.OrganizationStatus = strings.TrimSpace(snapshot.Organization)
+	run.ConfirmedAt = strings.TrimSpace(snapshot.ConfirmedAt)
+	run.SourceURL = strings.TrimSpace(snapshot.SourceURL)
+	if len(snapshot.Card) > 0 {
+		run.Card = append(json.RawMessage(nil), snapshot.Card...)
+	}
+	if len(snapshot.OpenAPI) > 0 {
+		run.OpenAPI = append(json.RawMessage(nil), snapshot.OpenAPI...)
+	}
+	run.InternalAccess = snapshot.InternalAccess
+	run.AllowedHosts = append([]string(nil), snapshot.AllowedHosts...)
+	run.SecretAliases = make([]WorkAssetRunSecretRef, 0, len(snapshot.SecretAliases))
+	for _, ref := range snapshot.SecretAliases {
+		run.SecretAliases = append(run.SecretAliases, WorkAssetRunSecretRef{
+			Alias: ref.Alias, Location: ref.Location, EnvName: ref.EnvName,
+		})
+	}
+	run.Operations = append([]WorkAssetRunAPIOperation(nil), snapshot.Operations...)
+	if run.AllowedHosts == nil {
+		run.AllowedHosts = []string{}
+	}
+	if run.SecretAliases == nil {
+		run.SecretAliases = []WorkAssetRunSecretRef{}
+	}
+	if run.Operations == nil {
+		run.Operations = []WorkAssetRunAPIOperation{}
+	}
 	if len(snapshot.ChunkIDs) > 0 {
 		run.ChunkIDs = append([]int64(nil), snapshot.ChunkIDs...)
 	}
@@ -1286,6 +1376,153 @@ func applyWorkAssetRunSnapshot(run *WorkTaskAssetRun) {
 	if len([]rune(run.ContentPreview)) > 240 {
 		run.ContentPreview = string([]rune(run.ContentPreview)[:240]) + "…"
 	}
+	run.Snapshot = sanitizeWorkAssetRunSnapshot(run.Snapshot)
+}
+
+// sanitizeWorkAssetRunSnapshot removes the server-only environment variable
+// names before a frozen execution snapshot is returned to Web or Android.
+func sanitizeWorkAssetRunSnapshot(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return raw
+	}
+	var strip func(any)
+	strip = func(current any) {
+		switch typed := current.(type) {
+		case map[string]any:
+			delete(typed, "env_name")
+			for _, child := range typed {
+				strip(child)
+			}
+		case []any:
+			for _, child := range typed {
+				strip(child)
+			}
+		}
+	}
+	strip(value)
+	sanitized, err := json.Marshal(value)
+	if err != nil {
+		return raw
+	}
+	return sanitized
+}
+
+func (d *DB) SaveWorkAssetAPICall(ctx context.Context, call WorkAssetAPICall) (*WorkAssetAPICall, error) {
+	call.OperationID = strings.TrimSpace(call.OperationID)
+	call.Method = strings.ToUpper(strings.TrimSpace(call.Method))
+	call.Host = strings.TrimSpace(call.Host)
+	call.Path = strings.TrimSpace(call.Path)
+	call.Error = strings.TrimSpace(call.Error)
+	call.ResponsePreview = strings.TrimSpace(call.ResponsePreview)
+	if call.TaskID <= 0 || call.OperationID == "" || call.Host == "" || call.Path == "" {
+		return nil, errors.New("接口调用审计缺少必要字段")
+	}
+	switch call.Method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS":
+	default:
+		return nil, errors.New("接口调用方法无效")
+	}
+	if call.DurationMS < 0 {
+		call.DurationMS = 0
+	}
+	if len([]rune(call.Error)) > 2000 {
+		call.Error = string([]rune(call.Error)[:2000])
+	}
+	if len([]rune(call.ResponsePreview)) > 4096 {
+		call.ResponsePreview = string([]rune(call.ResponsePreview)[:4096])
+	}
+	var storedArtexTaskID string
+	err := d.QueryRowContext(ctx, `SELECT artex_task_id FROM work_tasks
+WHERE id=$1 AND owner_key=$2`, call.TaskID, WorkOwner).Scan(&storedArtexTaskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrWorkNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	call.ArtexTaskID = strings.TrimSpace(call.ArtexTaskID)
+	if call.ArtexTaskID == "" {
+		call.ArtexTaskID = storedArtexTaskID
+	} else if call.ArtexTaskID != storedArtexTaskID {
+		return nil, errors.New("接口调用审计与个人任务关联的 ARTEX 任务不一致")
+	}
+	var assetVersionExists bool
+	if call.AssetID > 0 && call.AssetVersionID > 0 {
+		if err := d.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1
+FROM work_assets a
+JOIN work_asset_versions v ON v.asset_id=a.id AND v.id=$3
+WHERE a.id=$1 AND a.owner_key=$2
+  AND ($4::bigint=0 OR v.organization_id=$4)
+)`, call.AssetID, WorkOwner, call.AssetVersionID, call.OrganizationID).Scan(&assetVersionExists); err != nil {
+			return nil, err
+		}
+	}
+	if !assetVersionExists {
+		// The call already happened. Keep its audit record even if the asset was
+		// moved to trash or purged concurrently; the task and request metadata
+		// remain the security-relevant facts.
+		call.AssetID = 0
+		call.AssetVersionID = 0
+		call.OrganizationID = 0
+	}
+	if call.OrganizationID > 0 {
+		var organizationExists bool
+		if err := d.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM work_asset_organizations o
+JOIN work_assets a ON a.id=o.asset_id AND a.owner_key=$4
+WHERE o.id=$1 AND o.asset_id=$2 AND o.owner_key=$4 AND o.confirmed_version_id=$3
+)`, call.OrganizationID, call.AssetID, call.AssetVersionID, WorkOwner).Scan(&organizationExists); err != nil {
+			return nil, err
+		}
+		if !organizationExists {
+			call.OrganizationID = 0
+		}
+	}
+	err = d.QueryRowContext(ctx, `INSERT INTO work_asset_api_calls
+(owner_key,task_id,artex_task_id,asset_id,asset_version_id,organization_id,
+ operation_id,method,host,path,status_code,success,duration_ms,error,response_preview)
+VALUES($1,$2,$3,NULLIF($4,0),NULLIF($5,0),NULLIF($6,0),$7,$8,$9,$10,$11,$12,$13,$14,$15)
+RETURNING id,created_at`, WorkOwner, call.TaskID, call.ArtexTaskID, call.AssetID,
+		call.AssetVersionID, call.OrganizationID, call.OperationID, call.Method, call.Host,
+		call.Path, call.StatusCode, call.Success, call.DurationMS, call.Error,
+		call.ResponsePreview).Scan(&call.ID, &call.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &call, nil
+}
+
+func (d *DB) ListWorkAssetAPICalls(ctx context.Context, taskID int64) ([]*WorkAssetAPICall, error) {
+	if _, err := d.GetWorkTask(ctx, taskID); err != nil {
+		return nil, err
+	}
+	rows, err := d.QueryContext(ctx, `SELECT id,task_id,artex_task_id,COALESCE(asset_id,0),
+COALESCE(asset_version_id,0),COALESCE(organization_id,0),operation_id,method,host,path,
+status_code,success,duration_ms,error,response_preview,created_at
+FROM work_asset_api_calls
+WHERE owner_key=$2 AND task_id=$1
+ORDER BY created_at DESC,id DESC`, taskID, WorkOwner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*WorkAssetAPICall{}
+	for rows.Next() {
+		var item WorkAssetAPICall
+		if err := rows.Scan(&item.ID, &item.TaskID, &item.ArtexTaskID, &item.AssetID,
+			&item.AssetVersionID, &item.OrganizationID, &item.OperationID, &item.Method,
+			&item.Host, &item.Path, &item.StatusCode, &item.Success, &item.DurationMS,
+			&item.Error, &item.ResponsePreview, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &item)
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) WorkTaskAssetStats(ctx context.Context) (map[string]int64, error) {

@@ -67,6 +67,7 @@ import type {
 import { cn } from "@/lib/utils";
 
 import { WorkEmptyState, WorkErrorState, WorkPageHeader } from "../_components/work-shell";
+import { WorkAssetOrganizationPanel } from "./work-asset-organization-panel";
 
 type AssetView = "active" | "archived" | "trash";
 
@@ -92,6 +93,30 @@ const PARSE_CLASSES: Record<WorkAssetParseStatus, string> = {
   ready: "border-emerald-500/25 bg-emerald-500/10 text-emerald-700",
   partial: "border-amber-500/25 bg-amber-500/10 text-amber-700",
   failed: "border-destructive/25 bg-destructive/10 text-destructive",
+};
+
+const ORGANIZATION_LABELS: Record<
+  Exclude<WorkAsset["organization_status"], "none">,
+  string
+> = {
+  queued: "整理已排队",
+  processing: "AI 整理中",
+  draft: "草稿待确认",
+  failed: "整理失败",
+  confirmed: "整理已确认",
+  discarded: "整理已丢弃",
+};
+
+const ORGANIZATION_CLASSES: Record<
+  Exclude<WorkAsset["organization_status"], "none">,
+  string
+> = {
+  queued: "border-sky-500/25 bg-sky-500/10 text-sky-700",
+  processing: "border-violet-500/25 bg-violet-500/10 text-violet-700",
+  draft: "border-amber-500/25 bg-amber-500/10 text-amber-700",
+  failed: "border-destructive/25 bg-destructive/10 text-destructive",
+  confirmed: "border-emerald-500/25 bg-emerald-500/10 text-emerald-700",
+  discarded: "border-slate-400/25 bg-slate-500/10 text-slate-600",
 };
 
 function assetIcon(type: WorkAssetType, className = "size-5") {
@@ -567,6 +592,17 @@ function AssetCard({ asset, onClick }: { asset: WorkAsset; onClick: () => void }
           <p className="mt-1 text-xs text-muted-foreground">
             {ASSET_TYPE_LABELS[asset.asset_type]} · v{asset.current_version} · {formatBytes(asset.size_bytes)}
           </p>
+          {asset.organization_status !== "none" && (
+            <Badge
+              variant="outline"
+              className={cn(
+                "mt-2 border",
+                ORGANIZATION_CLASSES[asset.organization_status],
+              )}
+            >
+              {ORGANIZATION_LABELS[asset.organization_status]}
+            </Badge>
+          )}
         </div>
       </div>
       <p className="mt-3 line-clamp-3 text-sm leading-6 text-foreground/70">
@@ -1138,6 +1174,12 @@ function AssetDetailDialog({
               </div>
             </DialogHeader>
 
+            <WorkAssetOrganizationPanel
+              asset={detail.asset}
+              sourceVersion={selectedVersion}
+              onChanged={onChanged}
+            />
+
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.8fr)]">
               <div className="space-y-4">
                 <section className="rounded-[20px] border bg-white/65 p-4">
@@ -1382,8 +1424,22 @@ function AssetDetailDialog({
                           version.id === selectedVersionID && "border-violet-300 bg-violet-500/[0.06]",
                         )}
                       >
-                        <span>版本 {version.version_number}</span>
-                        <span className="text-xs text-muted-foreground">{formatTime(version.created_at)}</span>
+                        <span className="flex flex-wrap items-center gap-2">
+                          <span>版本 {version.version_number}</span>
+                          {version.content_origin === "ai_organized" && (
+                            <Badge
+                              variant="outline"
+                              className="border-violet-500/25 bg-violet-500/10 text-violet-700"
+                            >
+                              AI 整理
+                            </Badge>
+                          )}
+                        </span>
+                        <span className="text-right text-xs text-muted-foreground">
+                          {version.confirmed_at
+                            ? `确认于 ${formatTime(version.confirmed_at)}`
+                            : formatTime(version.created_at)}
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -1423,7 +1479,6 @@ function AssetDetailDialog({
                     className="h-11 rounded-xl"
                     disabled={busy}
                     onClick={() => {
-                      const download = detail.asset.download_url;
                       void api.workAssetContentBlob(detail.asset.id).then((blob) => {
                         const url = URL.createObjectURL(blob);
                         const anchor = document.createElement("a");
@@ -1432,7 +1487,6 @@ function AssetDetailDialog({
                         anchor.click();
                         window.setTimeout(() => URL.revokeObjectURL(url), 1000);
                       }).catch((cause: Error) => toast.error(`下载失败：${cause.message}`));
-                      void download;
                     }}
                   >
                     <Download className="size-4" />

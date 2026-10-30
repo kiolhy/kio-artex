@@ -280,6 +280,46 @@ export interface WorkTaskAssetRun {
   snapshot: Record<string, unknown> | null;
   created_at: string;
   content_preview: string;
+  content_origin: "source" | "ai_organized" | string;
+  organization_id?: number;
+  organization_status?: string;
+  confirmed_at?: string;
+  card?: Record<string, unknown> | null;
+  openapi?: Record<string, unknown> | null;
+  internal_access: boolean;
+  allowed_hosts: string[];
+  secret_aliases: Array<{
+    alias: string;
+    location: string;
+  }>;
+  operations: WorkAssetRunAPIOperation[];
+}
+
+export interface WorkAssetRunAPIOperation {
+  operation_id: string;
+  method: string;
+  path: string;
+  summary?: string;
+  write: boolean;
+}
+
+export interface WorkAssetAPICall {
+  id: number;
+  task_id: number;
+  artex_task_id: string;
+  asset_id: number;
+  asset_version_id: number;
+  organization_id?: number;
+  operation_id: string;
+  method: string;
+  host: string;
+  path: string;
+  status_code: number;
+  success: boolean;
+  duration_ms: number;
+  error?: string;
+  response_preview?: string;
+  created_at: string;
 }
 
 export interface WorkTaskAssets {

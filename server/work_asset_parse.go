@@ -537,16 +537,11 @@ func resolveOpenAPIObject(root map[string]any, object map[string]any) map[string
 	if !strings.HasPrefix(ref, "#/") {
 		return object
 	}
-	var current any = root
-	for _, part := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
-		part = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
-		next, ok := current.(map[string]any)
-		if !ok {
-			return object
-		}
-		current = next[part]
+	resolvedValue, err := resolveOpenAPIJSONPointer(root, ref)
+	if err != nil {
+		return object
 	}
-	resolved, _ := current.(map[string]any)
+	resolved, _ := resolvedValue.(map[string]any)
 	if resolved == nil {
 		return object
 	}

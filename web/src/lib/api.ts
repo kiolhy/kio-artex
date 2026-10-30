@@ -106,6 +106,7 @@ import type {
   WorkspaceListing,
   WorkAutomationOverview,
   WorkAsset,
+  WorkAssetAPICall,
   WorkAssetChunk,
   WorkAssetDetail,
   WorkAssetInput,
@@ -1557,4 +1558,6 @@ export const api = {
     post<WorkTaskAssetCandidate[]>(`/work/tasks/${id}/assets/recommend`).then(arr),
   workTaskAssetRuns: (id: number) =>
     get<WorkTaskAssetRun[]>(`/work/tasks/${id}/asset-runs`).then(arr),
+  workTaskAssetAPICalls: (id: number) =>
+    get<WorkAssetAPICall[]>(`/work/tasks/${id}/asset-api-calls`).then(arr),
 };

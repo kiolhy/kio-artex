@@ -79,6 +79,7 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolUpdateFindingReport(),
 		s.toolGetFindingTraffic(),
 		s.toolBindFindingTraffic(),
+		s.toolCallWorkAssetAPI(),
 	}
 }
 
@@ -480,6 +481,8 @@ func (s *Server) seedOrchestrationTools() {
 		bindings := autoAgents
 		if t.Name() == "bind_finding_traffic" {
 			bindings = json.RawMessage(`["reporter"]`)
+		} else if t.Name() == "call_work_asset_api" {
+			bindings = json.RawMessage(`["worker"]`)
 		}
 		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, bindings)
 	}
@@ -501,9 +504,32 @@ func (s *Server) seedOrchestrationTools() {
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingWorkflowTools()
+	s.seedWorkAssetAPIToolApproval()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
+}
+
+// seedWorkAssetAPIToolApproval appends the new side-effecting tool once without
+// replacing any user-managed intercept tool selection.
+func (s *Server) seedWorkAssetAPIToolApproval() {
+	const flag = "intercept_work_asset_api_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	tools, err := s.m.interceptor.GetEnabledTools()
+	if err != nil {
+		log.Printf("[intercept] 读取受控接口工具审批配置失败: %v", err)
+		return
+	}
+	if !contains(tools, "call_work_asset_api") {
+		tools = append(tools, "call_work_asset_api")
+		if err := s.m.interceptor.SetEnabledTools(tools); err != nil {
+			log.Printf("[intercept] 启用受控接口工具审批失败: %v", err)
+			return
+		}
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
 }
 
 // refreshBuiltinToolSchemas propagates code schema/description changes on the
@@ -512,7 +538,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v7_list_facts_paging"
+	const flag = "tool_schema_refresh_v8_work_asset_api"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}

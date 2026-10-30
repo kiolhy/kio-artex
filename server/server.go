@@ -1000,6 +1000,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/work/tasks/{id}/assets", s.workReplaceTaskAssets)
 	mux.HandleFunc("POST /api/work/tasks/{id}/assets/recommend", s.workRecommendTaskAssets)
 	mux.HandleFunc("GET /api/work/tasks/{id}/asset-runs", s.workTaskAssetRuns)
+	mux.HandleFunc("GET /api/work/tasks/{id}/asset-api-calls", s.workTaskAssetAPICalls)
 	mux.HandleFunc("GET /api/work/calendar/events", s.workCalendarEvents)
 	mux.HandleFunc("GET /api/work/tasks/{id}/reminders", s.workListReminders)
 	mux.HandleFunc("PUT /api/work/tasks/{id}/reminders", s.workReplaceReminders)
